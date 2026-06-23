@@ -1,6 +1,7 @@
 <template>
   <div class="file-uploader">
     <div class="drop-zone" @click="triggerUpload" @dragover.prevent @drop.prevent="handleDrop">
+      <span class="drop-icon">&#8686;</span>
       <p>Click or drag files here</p>
       <input ref="fileInput" type="file" multiple :accept="accept" style="display: none" @change="handleFiles" />
     </div>
@@ -28,12 +29,22 @@ function handleDrop(event: DragEvent) {
 
 <style scoped>
 .drop-zone {
-  border: 2px dashed #ddd;
+  border: 2px dashed var(--border);
   border-radius: 8px;
   padding: 30px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, background 0.2s;
+  color: var(--text-secondary);
 }
-.drop-zone:hover { border-color: #4361ee; }
+.drop-zone:hover {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.05);
+}
+.drop-icon {
+  font-size: 24px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 4px;
+}
 </style>

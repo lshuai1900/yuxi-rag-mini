@@ -29,13 +29,21 @@ export const deleteFile = (kbId: string, fileId: string) =>
   api.delete(`/kb/${kbId}/files/${fileId}`)
 
 // Query APIs
+export interface RetrievalConfig {
+  search_mode?: 'vector' | 'keyword' | 'hybrid'
+  final_top_k?: number
+  similarity_threshold?: number
+  bm25_top_k?: number
+  vector_weight?: number
+  bm25_weight?: number
+  bm25_drop_ratio_search?: number
+  recall_top_k?: number
+  use_reranker?: boolean
+}
+
 export const queryKnowledgeBase = (kbId: string, data: {
   query: string
-  search_mode?: 'vector' | 'keyword' | 'hybrid'
-  top_k?: number
-  similarity_threshold?: number
-  enable_rerank?: boolean
-  enable_graphrag?: boolean
+  retrieval_config?: RetrievalConfig
 }) => api.post(`/kb/${kbId}/query`, data)
 
 // Health

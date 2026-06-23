@@ -31,7 +31,7 @@ from app.main import app
 from app.rag.storage.database import init_db
 from app.core.config import settings
 
-# Override Milvus URI to use Milvus Lite (local file) for testing
+# Override Milvus Uri to use Milvus Lite (local file) for testing
 settings.MILVUS_URI = os.path.join(_test_dir, "milvus.db")
 
 
@@ -159,6 +159,9 @@ Deep learning uses neural networks with multiple layers.
     vec_data = vec_resp.json()
     assert vec_data["search_mode"] == "vector"
     assert len(vec_data["results"]) > 0
+    # Verify score_detail exists
+    assert vec_data["results"][0]["score_detail"] is not None
+    assert vec_data["results"][0]["score_detail"]["source"] == "vector"
 
     # Keyword search
     kw_resp = await client.post(f"/api/kb/{kb_id}/query", json={
@@ -170,6 +173,9 @@ Deep learning uses neural networks with multiple layers.
     kw_data = kw_resp.json()
     assert kw_data["search_mode"] == "keyword"
     assert len(kw_data["results"]) > 0
+    # Verify score_detail exists
+    assert kw_data["results"][0]["score_detail"] is not None
+    assert kw_data["results"][0]["score_detail"]["source"] == "keyword"
 
     # Hybrid search
     hyb_resp = await client.post(f"/api/kb/{kb_id}/query", json={
@@ -181,6 +187,9 @@ Deep learning uses neural networks with multiple layers.
     hyb_data = hyb_resp.json()
     assert hyb_data["search_mode"] == "hybrid"
     assert len(hyb_data["results"]) > 0
+    # Verify score_detail with hybrid source
+    assert hyb_data["results"][0]["score_detail"] is not None
+    assert hyb_data["results"][0]["score_detail"]["source"] == "hybrid"
 
     # GraphRAG placeholder
     graph_resp = await client.post(f"/api/kb/{kb_id}/query", json={
@@ -212,3 +221,21 @@ async def test_no_yuxi_imports():
                     except SyntaxError:
                         pass
     assert len(errors) == 0, f"Found yuxi.* imports: {errors}"
+
+
+@pytest.mark.asyncio
+async def test_backend_import():
+    """Test: backend/app can be fully imported."""
+    import importlib
+    try:
+        importlib.import_module("app.main")
+        importlib.import_module("app.rag.schemas")
+        importlib.import_module("app.rag.base")
+        importlib.import_module("app.rag.backends.milvus_kb")
+        importlib.import_module("app.rag.parser.factory")
+        importlib.import_module("app.rag.chunking.text_chunker")
+        importlib.import_module("app.rag.providers.embedding.fake")
+        importlib.import_module("app.rag.providers.rerank.dummy")
+        importlib.import_module("app.core.config")
+    except ImportError as e:
+        pytest.fail(f"Failed to import: {e}")
