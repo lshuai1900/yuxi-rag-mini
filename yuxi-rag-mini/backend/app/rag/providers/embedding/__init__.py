@@ -2,6 +2,7 @@ from app.rag.providers.embedding.base import BaseEmbeddingProvider
 from app.rag.providers.embedding.openai_compatible import OpenAICompatibleEmbedding
 from app.rag.providers.embedding.ollama import OllamaEmbedding
 from app.rag.providers.embedding.huggingface import HuggingFaceEmbedding
+from app.rag.providers.embedding.fake import FakeEmbeddingProvider
 
 
 def create_embedding_provider(
@@ -21,5 +22,7 @@ def create_embedding_provider(
                                batch_size=batch_size, **kwargs)
     elif provider == "huggingface":
         return HuggingFaceEmbedding(model=model, dimension=dimension, batch_size=batch_size, **kwargs)
+    elif provider == "fake":
+        return FakeEmbeddingProvider(dimension=dimension, **kwargs)
     else:
         raise ValueError(f"Unknown embedding provider: {provider}")

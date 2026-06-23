@@ -30,10 +30,12 @@ export const deleteFile = (kbId: string, fileId: string) =>
 
 // Query APIs
 export const queryKnowledgeBase = (kbId: string, data: {
-  query_text: string
+  query: string
   search_mode?: 'vector' | 'keyword' | 'hybrid'
   top_k?: number
   similarity_threshold?: number
+  enable_rerank?: boolean
+  enable_graphrag?: boolean
 }) => api.post(`/kb/${kbId}/query`, data)
 
 // Health

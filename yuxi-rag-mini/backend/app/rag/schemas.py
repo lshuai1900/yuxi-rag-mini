@@ -3,25 +3,27 @@ from pydantic import BaseModel, Field
 
 
 class SearchResultSchema(BaseModel):
-    id: str = Field(description="chunk ID")
-    kb_id: str = Field(description="knowledge base ID")
+    chunk_id: str = Field(description="chunk ID")
     file_id: str = Field(default="", description="file ID")
+    filename: str = Field(default="", description="source filename")
     content: str = Field(description="chunk content")
+    score: float = Field(default=0.0, description="relevance score")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SearchOutputSchema(BaseModel):
-    kb_id: str
+class QueryResponse(BaseModel):
+    query: str = Field(description="original query text")
+    search_mode: str = Field(description="search mode used")
     results: list[SearchResultSchema] = Field(default_factory=list)
 
 
-class SearchInputSchema(BaseModel):
-    kb_id: str
-    query_text: str
+class QueryRequest(BaseModel):
+    query: str = Field(description="query text")
     search_mode: Literal["vector", "keyword", "hybrid"] = "vector"
     top_k: int = Field(default=10, ge=1, le=100)
     similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
-    file_name: str | None = None
+    enable_rerank: bool = Field(default=False, description="enable rerank (DummyReranker only)")
+    enable_graphrag: bool = Field(default=False, description="enable GraphRAG (not implemented)")
 
 
 class KBCreateSchema(BaseModel):
@@ -51,3 +53,10 @@ class FileInfoSchema(BaseModel):
     chunk_count: int = 0
     token_count: int = 0
     created_at: str | None = None
+
+
+class IndexResponse(BaseModel):
+    file_id: str
+    filename: str
+    chunk_count: int
+    status: str

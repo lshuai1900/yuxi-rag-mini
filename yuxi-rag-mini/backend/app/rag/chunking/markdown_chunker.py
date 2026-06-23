@@ -1,12 +1,24 @@
 import re
 from typing import Any
-from app.rag.chunking.text_chunker import count_tokens, _hard_split
+from app.rag.chunking.text_chunker import ChunkResult, count_tokens, _hard_split
 
 
-def chunk_markdown(text: str, chunk_token_num: int = 512, overlapped_percent: int = 0) -> list[str]:
+def chunk_markdown(
+    text: str,
+    chunk_size: int = 512,
+    chunk_overlap: int = 50,
+    file_id: str = "",
+    kb_id: str = "",
+    filename: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> list[ChunkResult]:
     """Chunk markdown text by headings first, then by token limit."""
     if not text or not text.strip():
         return []
+
+    chunk_size = max(int(chunk_size), 1)
+    chunk_overlap = max(0, min(int(chunk_overlap), chunk_size - 1))
+    base_metadata = metadata or {}
 
     # Split by headings
     heading_pattern = re.compile(r'^(#{1,6}\s+.+)$', re.MULTILINE)
@@ -27,30 +39,61 @@ def chunk_markdown(text: str, chunk_token_num: int = 512, overlapped_percent: in
             sections.append(remaining)
 
     if not sections:
-        return [text.strip()] if text.strip() else []
+        sections = [text.strip()] if text.strip() else []
 
     # Merge sections into chunks
-    chunk_token_num = max(int(chunk_token_num or 0), 1)
-    chunks = [""]
-    token_nums = [0]
-
+    raw_chunks: list[str] = []
+    current_chunk = ""
     for sec in sections:
-        tnum = count_tokens(sec)
-        if token_nums[-1] + tnum > chunk_token_num and chunks[-1].strip():
-            chunks.append(sec)
-            token_nums.append(tnum)
+        if current_chunk and count_tokens(current_chunk + "\n\n" + sec) > chunk_size:
+            raw_chunks.append(current_chunk.strip())
+            if chunk_overlap > 0 and current_chunk.strip():
+                from app.rag.chunking.text_chunker import _get_overlap_text
+                overlap_text = _get_overlap_text(current_chunk, chunk_overlap)
+                current_chunk = (overlap_text + "\n\n" + sec).strip() if overlap_text else sec
+            else:
+                current_chunk = sec
         else:
-            chunks[-1] = (chunks[-1] + "\n\n" + sec).strip()
-            token_nums[-1] += tnum
+            current_chunk = (current_chunk + "\n\n" + sec).strip() if current_chunk else sec
+
+    if current_chunk.strip():
+        raw_chunks.append(current_chunk.strip())
 
     # Hard split oversized chunks
-    result = []
-    for chunk in chunks:
-        if not chunk.strip():
-            continue
-        if count_tokens(chunk) <= chunk_token_num:
-            result.append(chunk.strip())
+    final_chunks: list[str] = []
+    for chunk in raw_chunks:
+        if count_tokens(chunk) <= chunk_size:
+            final_chunks.append(chunk)
         else:
-            result.extend(_hard_split(chunk, chunk_token_num))
+            final_chunks.extend(_hard_split(chunk, chunk_size))
 
-    return result
+    # Build ChunkResult list
+    results = []
+    for idx, content in enumerate(final_chunks):
+        if not content.strip():
+            continue
+        chunk_id = f"{file_id}_chunk_{idx}" if file_id else f"chunk_{idx}"
+        results.append(ChunkResult(
+            content=content,
+            chunk_index=idx,
+            chunk_id=chunk_id,
+            file_id=file_id,
+            kb_id=kb_id,
+            filename=filename,
+            metadata={**base_metadata},
+        ))
+
+    # Ensure at least one chunk
+    if not results and text.strip():
+        chunk_id = f"{file_id}_chunk_0" if file_id else "chunk_0"
+        results.append(ChunkResult(
+            content=text.strip(),
+            chunk_index=0,
+            chunk_id=chunk_id,
+            file_id=file_id,
+            kb_id=kb_id,
+            filename=filename,
+            metadata={**base_metadata},
+        ))
+
+    return results

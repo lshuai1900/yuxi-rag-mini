@@ -1,15 +1,29 @@
 from typing import Any
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, or_
 from app.rag.storage.database import async_session
 from app.rag.storage.models import KnowledgeChunkModel
 
 
 class KnowledgeChunkRepository:
+    async def get_all(self) -> list[KnowledgeChunkModel]:
+        async with async_session() as session:
+            result = await session.execute(select(KnowledgeChunkModel))
+            return list(result.scalars().all())
+
     async def list_by_file_id(self, file_id: str) -> list[KnowledgeChunkModel]:
         async with async_session() as session:
             result = await session.execute(
                 select(KnowledgeChunkModel)
                 .where(KnowledgeChunkModel.file_id == file_id)
+                .order_by(KnowledgeChunkModel.chunk_index.asc())
+            )
+            return list(result.scalars().all())
+
+    async def list_by_kb_id(self, kb_id: str) -> list[KnowledgeChunkModel]:
+        async with async_session() as session:
+            result = await session.execute(
+                select(KnowledgeChunkModel)
+                .where(KnowledgeChunkModel.kb_id == kb_id)
                 .order_by(KnowledgeChunkModel.chunk_index.asc())
             )
             return list(result.scalars().all())
@@ -60,3 +74,24 @@ class KnowledgeChunkRepository:
                 .group_by(KnowledgeChunkModel.file_id)
             )
             return {str(fid): int(cnt or 0) for fid, cnt in result.all()}
+
+    async def search_by_keyword(self, kb_id: str, query: str, limit: int = 10) -> list[KnowledgeChunkModel]:
+        """Simple keyword search using SQL LIKE. Fallback for BM25."""
+        if not query or not query.strip():
+            return []
+        keywords = [kw.strip() for kw in query.strip().split() if kw.strip()]
+        if not keywords:
+            return []
+        async with async_session() as session:
+            conditions = []
+            for kw in keywords:
+                conditions.append(KnowledgeChunkModel.content.ilike(f"%{kw}%"))
+            stmt = (
+                select(KnowledgeChunkModel)
+                .where(KnowledgeChunkModel.kb_id == kb_id)
+                .where(or_(*conditions))
+                .order_by(KnowledgeChunkModel.chunk_index.asc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return list(result.scalars().all())

@@ -1,9 +1,9 @@
 import os
 import hashlib
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.rag.manager import KnowledgeBaseManager
 from app.api.kb_routes import get_manager
 from app.rag.storage import get_file_storage
+from app.rag.schemas import IndexResponse
 from app.core.logging import logger
 
 router = APIRouter(prefix="/api/kb/{kb_id}/files", tags=["Files"])
@@ -41,25 +41,33 @@ async def parse_file(kb_id: str, file_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/{file_id}/index")
+@router.post("/{file_id}/index", response_model=IndexResponse)
 async def index_file(kb_id: str, file_id: str):
+    """Parse and index a file: parse -> chunk -> embed -> write to Milvus + SQLite."""
     manager = get_manager()
     try:
+        # Auto-parse if not yet parsed
+        kb_instance = await manager._get_kb_for_database(kb_id)
+        if kb_instance and file_id in kb_instance.files_meta:
+            file_meta = kb_instance.files_meta[file_id]
+            if file_meta.get("status") in [FileStatus.UPLOADED]:
+                await manager.parse_file(kb_id, file_id)
+
         result = await manager.index_file(kb_id, file_id)
-        return result
+        return IndexResponse(**result)
     except Exception as e:
         logger.error(f"Index failed: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.post("/{file_id}/ingest")
+@router.post("/{file_id}/ingest", response_model=IndexResponse)
 async def ingest_file(kb_id: str, file_id: str):
     """Parse and index a file in one step."""
     manager = get_manager()
     try:
-        parse_result = await manager.parse_file(kb_id, file_id)
-        index_result = await manager.index_file(kb_id, file_id)
-        return index_result
+        await manager.parse_file(kb_id, file_id)
+        result = await manager.index_file(kb_id, file_id)
+        return IndexResponse(**result)
     except Exception as e:
         logger.error(f"Ingest failed: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -82,3 +90,7 @@ async def delete_file(kb_id: str, file_id: str):
         return {"message": "deleted"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# Import FileStatus for auto-parse check
+from app.rag.base import FileStatus

@@ -1,12 +1,12 @@
 import asyncio
-from app.rag.parser.base import BaseParser
+from app.rag.parser.base import BaseParser, ParseResult
 
 
 class DocxParser(BaseParser):
-    async def parse(self, file_path: str) -> str:
-        return await asyncio.to_thread(self._parse_sync, file_path)
+    async def parse(self, file_path: str, filename: str = "") -> ParseResult:
+        return await asyncio.to_thread(self._parse_sync, file_path, filename)
 
-    def _parse_sync(self, file_path: str) -> str:
+    def _parse_sync(self, file_path: str, filename: str = "") -> ParseResult:
         from docx import Document
         document = Document(file_path)
         blocks = []
@@ -29,7 +29,14 @@ class DocxParser(BaseParser):
                 normalized = row + [""] * (len(header) - len(row))
                 blocks.append(f"| {' | '.join(normalized[:len(header)])} |")
             blocks.append("")
-        return "\n\n".join(blocks).strip()
+        full_text = "\n\n".join(blocks).strip()
+        return ParseResult(
+            text=full_text,
+            filename=filename,
+            file_type="docx",
+            pages=[],
+            metadata={},
+        )
 
     def supported_extensions(self) -> list[str]:
         return [".docx"]
