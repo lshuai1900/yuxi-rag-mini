@@ -37,6 +37,9 @@ class KnowledgeFileModel(Base):
     processing_params = Column(JSON)
     is_folder = Column(Boolean, default=False)
     error_message = Column(Text)
+    failed_reason = Column(Text)
+    failed_stage = Column(String(32))
+    failed_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

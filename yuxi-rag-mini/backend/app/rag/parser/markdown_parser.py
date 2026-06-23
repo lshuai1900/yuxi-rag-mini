@@ -3,8 +3,22 @@ from app.rag.parser.base import BaseParser, ParseResult
 
 class MarkdownParser(BaseParser):
     async def parse(self, file_path: str, filename: str = "") -> ParseResult:
-        with open(file_path, encoding="utf-8") as f:
-            text = f.read()
+        # Try utf-8 first, then fallback
+        text = None
+        for encoding in ["utf-8", "utf-8-sig", "gbk"]:
+            try:
+                with open(file_path, encoding=encoding) as f:
+                    text = f.read()
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+
+        if text is None:
+            raise ValueError(f"Cannot decode {filename or 'Markdown file'} with supported encodings (utf-8, gbk).")
+
+        if not text.strip():
+            raise ValueError(f"No extractable content found in {filename or 'Markdown file'}. The file may be empty.")
+
         return ParseResult(
             text=text,
             filename=filename,

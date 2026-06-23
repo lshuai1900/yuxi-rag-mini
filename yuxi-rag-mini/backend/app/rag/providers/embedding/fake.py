@@ -8,7 +8,10 @@ class FakeEmbeddingProvider(BaseEmbeddingProvider):
 
     WARNING: This provider generates deterministic but meaningless vectors.
     It should ONLY be used for testing the pipeline, NOT for real RAG.
-    Search results will be meaningless with this provider.
+
+    - Search results will be meaningless with this provider.
+    - Not suitable for real semantic retrieval.
+    - For resume demonstrations, use a real embedding provider (OpenAI-compatible, Ollama, or HuggingFace).
     """
 
     def __init__(self, dimension: int = 128, **kwargs):

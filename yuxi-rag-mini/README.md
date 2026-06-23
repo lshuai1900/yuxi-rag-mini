@@ -1,228 +1,325 @@
 # Yuxi RAG Mini
 
-A lightweight RAG (Retrieval-Augmented Generation) knowledge base system, extracted and refactored from the [Yuxi](https://github.com/xerrors/Yuxi) project.
-
-## Features
-
-- **Knowledge Base Management**: Create, list, delete knowledge bases
-- **File Upload & Parsing**: Support PDF, Word (.docx), Markdown (.md), TXT
-- **Chunking**: Token-aware text chunking with overlap and markdown heading support
-- **Vector Search**: Milvus-powered vector similarity search
-- **Keyword Search**: SQLite-based keyword matching (fallback for BM25)
-- **Hybrid Search**: Weighted fusion of vector + keyword results
-- **Pluggable Embedding**: OpenAI-compatible, Ollama, HuggingFace, Fake (test only)
-- **Pluggable Storage**: Local filesystem or MinIO
-- **Pluggable Database**: SQLite (default) or PostgreSQL
-- **GraphRAG Interface**: Placeholder for future graph retrieval
-- **Rerank Interface**: DummyReranker placeholder for future reranking
+A lightweight, production-ready **Retrieval-Augmented Generation (RAG)** knowledge base system. Built with FastAPI + Vue 3 + Milvus, supporting multiple document formats, pluggable embedding providers, and hybrid search.
 
 ## Architecture
 
 ```
-yuxi-rag-mini/
-├── backend/app/
-│   ├── main.py              # FastAPI entry point
-│   ├── api/                 # REST API routes
-│   │   ├── kb_routes.py     # Knowledge base CRUD
-│   │   ├── file_routes.py   # File upload/parse/index
-│   │   ├── query_routes.py  # Query (vector/keyword/hybrid)
-│   │   └── health_routes.py # Health check
-│   ├── core/                # Config, logging, errors
-│   └── rag/
-│       ├── base.py          # KnowledgeBase ABC
-│       ├── factory.py       # KB factory
-│       ├── manager.py       # KB manager
-│       ├── schemas.py       # Pydantic schemas
-│       ├── backends/
-│       │   └── milvus_kb.py # MilvusKB implementation
-│       ├── chunking/        # Text & markdown chunkers
-│       ├── parser/          # PDF, DOCX, MD, TXT parsers
-│       ├── providers/
-│       │   ├── embedding/   # OpenAI/Ollama/HuggingFace/Fake
-│       │   └── rerank/      # DummyReranker + APIReranker
-│       ├── storage/         # DB models, file storage, Milvus client
-│       ├── repositories/    # DB repositories
-│       └── graphrag/        # GraphRAG interfaces (placeholder)
-└── frontend/src/            # Vue 3 + Vite frontend
+┌─────────────────────────────────────────────────────────────┐
+│                      Vue 3 + Vite Frontend                  │
+│         (Upload / Index / Query with Score Detail)          │
+└────────────────────────────┬────────────────────────────────┘
+                             │ HTTP API
+┌────────────────────────────▼────────────────────────────────┐
+│                       FastAPI Backend                        │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
+│  │ KB Routes │  │File Routes│  │Query Rts │  │Health Routes │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────────┘ │
+│       └──────────────┼─────────────┘                          │
+│              ┌───────▼────────┐                               │
+│              │ KnowledgeBase  │                               │
+│              │    Manager     │                               │
+│              └───────┬────────┘                               │
+│     ┌────────────────┼────────────────┐                      │
+│  ┌──▼──────┐  ┌─────▼─────┐  ┌──────▼──────┐               │
+│  │ Parser  │  │  Chunker  │  │  Embedding  │               │
+│  │(PDF/DOCX│  │(Text/MD)  │  │  Provider   │               │
+│  │ MD/TXT) │  │           │  │(OpenAI/Oll │               │
+│  └─────────┘  └───────────┘  │ ama/HF/Fake)│               │
+│                              └──────┬──────┘                │
+│  ┌──────────┐  ┌──────────┐        │                        │
+│  │ Reranker │  │ GraphRAG │        │                        │
+│  │ (Dummy)  │  │ (Planned)│        │                        │
+│  └──────────┘  └──────────┘        │                        │
+└─────────────────────────────────────┼────────────────────────┘
+                    ┌─────────────────┼─────────────────┐
+              ┌─────▼─────┐    ┌──────▼──────┐   ┌──────▼──────┐
+              │  Milvus   │    │   SQLite /  │   │Local / MinIO│
+              │(Lite/Stdl)│    │ PostgreSQL  │   │  Storage    │
+              └───────────┘    └─────────────┘   └─────────────┘
 ```
+
+## RAG Pipeline
+
+```
+Upload → Parse → Chunk → Embed → Index → Retrieve
+  │        │        │       │       │        │
+  │     PDF/DOCX  Text/MD  OpenAI  Milvus  Vector
+  │     MD/TXT    Chunker  Ollama  +SQLite Keyword
+  │                       HF/Fake          Hybrid
+```
+
+**File Status State Machine:**
+
+```
+uploaded → parsing → parsed → chunking → embedding → indexing → indexed
+                                                          ↘ failed (with reason & stage)
+```
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Backend | FastAPI, Pydantic, SQLAlchemy (async) |
+| Frontend | Vue 3, Vite, TypeScript |
+| Vector DB | Milvus (Lite / Standalone) |
+| Metadata DB | SQLite (aiosqlite) / PostgreSQL (asyncpg) |
+| File Storage | Local filesystem / MinIO |
+| Embedding | OpenAI-compatible, Ollama, HuggingFace, Fake (testing) |
+| Document Parsing | PyMuPDF, python-docx, custom Markdown/TXT parsers |
+
+## Search Modes
+
+### 1. Vector Search
+Dense vector similarity search using Milvus. Converts query to embedding and finds nearest neighbors by cosine similarity.
+
+### 2. Keyword Search
+Keyword search currently uses SQLite fallback with multi-keyword matching and scoring. Milvus BM25 is reserved for future enhancement.
+
+Scoring is based on:
+- Number of query keywords that match in the content
+- Slight normalization by content length
+
+### 3. Hybrid Search
+Combines vector and keyword results with weighted scoring:
+
+```
+final_score = vector_weight × normalized_vector_score + keyword_weight × normalized_keyword_score
+```
+
+Default weights: `vector_weight=0.7`, `keyword_weight=0.3`
+
+Results include `score_detail`:
+```json
+{
+  "vector_score": 0.82,
+  "keyword_score": 0.50,
+  "final_score": 0.724,
+  "source": "hybrid"
+}
+```
+
+Same chunk appearing in both vector and keyword results gets merged into one with combined score.
 
 ## Quick Start
 
-### 1. Start Milvus
+### Option A: Milvus Lite (Zero Dependencies)
 
-**Option A: Milvus Standalone (Docker)**
-```bash
-docker compose up -d milvus
-# Wait for Milvus to be healthy
-docker compose logs -f milvus
-```
-
-**Option B: Milvus Lite (No Docker, for development)**
-Set `MILVUS_URI=data/milvus.db` in `.env`. Milvus Lite runs embedded, no separate server needed.
-
-### 2. Configure Embedding Provider
-
-Copy and edit the environment file:
-```bash
-cp .env.example .env
-```
-
-**For testing (no external API needed):**
-```bash
-EMBEDDING_PROVIDER=fake
-EMBEDDING_DIMENSION=128
-```
-
-> **WARNING**: FakeEmbeddingProvider generates meaningless vectors. It should ONLY be used for testing the pipeline. Search results will be meaningless with this provider. For real RAG, use OpenAI-compatible or Ollama.
-
-**For real RAG with Ollama:**
-```bash
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_MODEL=bge-m3
-EMBEDDING_BASE_URL=http://localhost:11434/v1
-EMBEDDING_DIMENSION=1024
-```
-
-**For real RAG with OpenAI-compatible API:**
-```bash
-EMBEDDING_PROVIDER=openai_compatible
-EMBEDDING_MODEL=bge-m3
-EMBEDDING_BASE_URL=https://api.openai.com/v1
-EMBEDDING_API_KEY=sk-xxx
-EMBEDDING_DIMENSION=1024
-```
-
-### 3. Start Backend
+No Docker needed. Uses embedded Milvus + SQLite.
 
 ```bash
+# Backend
 cd backend
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
 pip install -e ..
+cp ../.env.example .env
+# Edit .env: set MILVUS_URI=data/milvus.db
+uvicorn app.main:app --reload --port 8000
 
-# Run server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### 4. Start Frontend
-
-```bash
+# Frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-### 5. Complete RAG Workflow
+### Option B: Milvus Standalone (Docker)
 
-1. Open http://localhost:3000
-2. Create a knowledge base
-3. Upload a PDF/Word/Markdown/TXT file
-4. Click "Index" to parse, chunk, embed, and store the file
-5. Switch to "Query" tab
-6. Select search mode (vector/keyword/hybrid)
-7. Enter a query and search
-8. View results with filename, score, content, and metadata
+```bash
+# Start Milvus stack
+docker compose up -d milvus
 
-## API Endpoints
+# Backend
+cd backend
+pip install -e ..
+cp ../.env.example .env
+# Edit .env: set MILVUS_URI=http://localhost:19530
+uvicorn app.main:app --reload --port 8000
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /api/health | Health check |
-| GET | /api/kb | List knowledge bases |
-| POST | /api/kb | Create knowledge base |
-| GET | /api/kb/{kb_id} | Get knowledge base info |
-| DELETE | /api/kb/{kb_id} | Delete knowledge base |
-| POST | /api/kb/{kb_id}/files/upload | Upload file |
-| POST | /api/kb/{kb_id}/files/{file_id}/parse | Parse file |
-| POST | /api/kb/{kb_id}/files/{file_id}/index | Parse + Index file |
-| POST | /api/kb/{kb_id}/files/{file_id}/ingest | Parse + Index in one step |
-| GET | /api/kb/{kb_id}/files | List files |
-| DELETE | /api/kb/{kb_id}/files/{file_id} | Delete file |
-| POST | /api/kb/{kb_id}/query | Query (vector/keyword/hybrid) |
-
-### Query Request Format
-
-```json
-{
-  "query": "What is deep learning?",
-  "search_mode": "hybrid",
-  "top_k": 5,
-  "similarity_threshold": 0.3,
-  "enable_rerank": false,
-  "enable_graphrag": false
-}
+# Frontend
+cd frontend
+npm install
+npm run dev
 ```
 
-### Query Response Format
+## API Examples
+
+### Create Knowledge Base
+
+```bash
+curl -X POST http://localhost:8000/api/kb \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My KB", "description": "Test knowledge base"}'
+```
+
+### Upload File
+
+```bash
+curl -X POST http://localhost:8000/api/kb/{kb_id}/files/upload \
+  -F "file=@document.pdf"
+```
+
+### Index File (parse + chunk + embed + write)
+
+```bash
+curl -X POST http://localhost:8000/api/kb/{kb_id}/files/{file_id}/index
+```
+
+### Query
+
+```bash
+curl -X POST http://localhost:8000/api/kb/{kb_id}/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is machine learning?",
+    "search_mode": "hybrid",
+    "top_k": 10,
+    "similarity_threshold": 0.0,
+    "enable_rerank": false
+  }'
+```
+
+**Query Response:**
 
 ```json
 {
-  "query": "What is deep learning?",
+  "query": "What is machine learning?",
   "search_mode": "hybrid",
   "results": [
     {
-      "chunk_id": "file_xxx_chunk_0",
-      "file_id": "file_xxx",
-      "filename": "ai_overview.md",
-      "content": "Deep learning uses neural networks...",
-      "score": 0.82,
-      "metadata": {"page": 1}
+      "chunk_id": "chunk_abc123",
+      "file_id": "file_xyz789",
+      "filename": "ai_overview.pdf",
+      "content": "Machine learning is a subset of AI...",
+      "score": 0.724,
+      "score_detail": {
+        "vector_score": 0.82,
+        "keyword_score": 0.50,
+        "final_score": 0.724,
+        "source": "hybrid"
+      },
+      "metadata": {"page_number": 3}
     }
-  ]
+  ],
+  "rerank": {
+    "reranked": false,
+    "reranker": "dummy"
+  }
 }
 ```
 
-## Search Modes
+## Frontend Usage
 
-| Mode | Description | Requires Embedding |
-|------|-------------|-------------------|
-| **vector** | Semantic similarity search using embeddings | Yes |
-| **keyword** | SQL LIKE-based keyword matching | No |
-| **hybrid** | Weighted merge of vector + keyword results | Yes |
+1. **Knowledge Bases** tab: Create and manage knowledge bases
+2. **Upload** tab: Upload files (PDF, DOCX, MD, TXT), view status, trigger indexing
+3. **Query** tab: Search with mode selection (vector/keyword/hybrid), adjust top_k and similarity threshold, view score details
 
 ## Configuration
 
-See `.env.example` for all configuration options.
+Key environment variables (see `.env.example` for full list):
 
-### Embedding Providers
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBEDDING_PROVIDER` | `fake` | `openai_compatible` / `ollama` / `huggingface` / `fake` |
+| `EMBEDDING_MODEL` | `bge-m3` | Model name for embedding |
+| `EMBEDDING_BASE_URL` | `http://localhost:11434/v1` | API base URL |
+| `EMBEDDING_API_KEY` | `` | API key (not logged at startup) |
+| `EMBEDDING_DIMENSION` | `128` | Embedding vector dimension |
+| `EMBEDDING_BATCH_SIZE` | `40` | Batch size for embedding |
+| `EMBEDDING_TIMEOUT` | `60` | Timeout in seconds |
+| `EMBEDDING_CHUNK_SIZE` | `512` | Chunk size in tokens |
+| `EMBEDDING_CHUNK_OVERLAP` | `50` | Overlap between chunks |
+| `MILVUS_URI` | `data/milvus.db` | Milvus connection URI |
+| `DB_TYPE` | `sqlite` | `sqlite` / `postgresql` |
+| `STORAGE_TYPE` | `local` | `local` / `minio` |
 
-| Provider | EMBEDDING_PROVIDER | Notes |
-|----------|-------------------|-------|
-| OpenAI Compatible | `openai_compatible` | Works with any OpenAI-compatible API |
-| Ollama | `ollama` | Uses Ollama's OpenAI-compatible endpoint |
-| HuggingFace | `huggingface` | Local sentence-transformers model |
-| Fake | `fake` | **Test only!** Generates meaningless vectors |
-
-### Storage
-
-| Type | STORAGE_TYPE | Notes |
-|------|-------------|-------|
-| Local | `local` | Default, files stored in `data/files/` |
-| MinIO | `minio` | S3-compatible object storage |
-
-### Database
-
-| Type | DB_TYPE | Notes |
-|------|---------|-------|
-| SQLite | `sqlite` | Default, zero-config |
-| PostgreSQL | `postgresql` | Set DATABASE_URL |
+> **WARNING**: `EMBEDDING_PROVIDER=fake` generates deterministic but meaningless vectors. It should ONLY be used for testing the pipeline, NOT for real RAG. For resume demonstrations, use a real embedding provider (OpenAI-compatible, Ollama, or HuggingFace).
 
 ## Testing
 
 ```bash
 cd backend
-pip install pytest pytest-asyncio httpx
-pytest ../tests/ -v
+python -m pytest ../tests/ -v
 ```
+
+Tests use FakeEmbeddingProvider + Milvus Lite + SQLite, no external dependencies needed.
 
 ## Current Limitations
 
-- **GraphRAG**: Only interfaces are defined, not implemented. When `enable_graphrag=true`, returns "GraphRAG is reserved but not implemented yet."
-- **Rerank**: Only DummyReranker is available. When `enable_rerank=true`, applies random scores for testing.
-- **Keyword Search**: Uses SQLite LIKE matching as fallback. Future: Milvus BM25 full-text search.
-- **Hybrid Search**: Uses simple weighted merge. Future: Milvus native hybrid_search with WeightedRanker.
-- **FakeEmbeddingProvider**: Only for testing. Search results are meaningless with this provider.
+- **Keyword search** currently uses SQLite fallback with LIKE matching, not Milvus native BM25. Milvus BM25 is reserved for future enhancement.
+- **GraphRAG** interface is reserved but not implemented. Querying with `enable_graphrag=true` returns a placeholder message.
+- **Rerank** current version provides rerank interface with DummyReranker. Real rerank model can be plugged in later.
+- **PDF** only supports extractable text via PyMuPDF. OCR is not enabled in this version.
+- **No user system** - single-user demo application.
+- **No multi-tenancy** - all knowledge bases are accessible without authentication.
 
-## Credits
+## Resume Highlights
 
-This project is extracted and refactored from [Yuxi](https://github.com/xerrors/Yuxi), retaining the core RAG knowledge base design while removing Agent, MCP, user system, and multi-tenant features.
+- **End-to-end RAG pipeline**: upload → parse → chunk → embed → index → retrieve, fully functional
+- **Hybrid search**: weighted merge of vector similarity and keyword matching with score normalization and deduplication
+- **Pluggable architecture**: embedding providers, rerankers, storage backends, and parsers are all pluggable via abstract base classes
+- **Multiple document formats**: PDF (PyMuPDF), DOCX, Markdown, TXT with encoding fallback
+- **Clean separation of concerns**: route → manager → knowledge base → providers, no business logic in route handlers
+- **Graceful degradation**: Milvus unavailable → clear error message, not crash
+- **Unified error format**: all API errors return structured `{code, message, details}` format
+- **File status state machine**: 8 states with failure tracking (reason + stage + timestamp)
+- **Zero-dependency testing**: FakeEmbeddingProvider + Milvus Lite + SQLite, no Docker or API keys needed
+
+## Project Structure
+
+```
+yuxi-rag-mini/
+├── backend/
+│   └── app/
+│       ├── api/                    # FastAPI route handlers
+│       │   ├── health_routes.py
+│       │   ├── kb_routes.py
+│       │   ├── file_routes.py
+│       │   └── query_routes.py
+│       ├── core/
+│       │   ├── config.py           # Pydantic Settings
+│       │   ├── errors.py
+│       │   └── logging.py
+│       └── rag/
+│           ├── base.py             # KnowledgeBase ABC + FileStatus
+│           ├── factory.py          # KnowledgeBaseFactory
+│           ├── manager.py          # KnowledgeBaseManager
+│           ├── schemas.py          # Pydantic request/response models
+│           ├── backends/
+│           │   └── milvus_kb.py    # MilvusKB implementation
+│           ├── parser/
+│           │   ├── base.py         # ParseResult + BaseParser
+│           │   ├── factory.py      # parse_file dispatcher
+│           │   ├── pdf_parser.py   # PyMuPDF (primary) + pypdf (fallback)
+│           │   ├── docx_parser.py
+│           │   ├── markdown_parser.py
+│           │   └── text_parser.py
+│           ├── chunking/
+│           │   ├── text_chunker.py
+│           │   └── markdown_chunker.py
+│           ├── providers/
+│           │   ├── embedding/      # OpenAI/Ollama/HuggingFace/Fake
+│           │   └── rerank/         # DummyReranker + ApiReranker
+│           ├── graphrag/
+│           │   └── interfaces.py   # Placeholder ABCs
+│           ├── repositories/
+│           │   ├── kb_repository.py
+│           │   ├── file_repository.py
+│           │   └── chunk_repository.py
+│           └── storage/
+│               ├── database.py
+│               ├── models.py
+│               ├── local_file_storage.py
+│               └── minio_storage.py
+├── frontend/                       # Vue 3 + Vite + TypeScript
+├── tests/
+│   ├── test_parser.py
+│   ├── test_chunker.py
+│   ├── test_hybrid_search.py
+│   └── test_pipeline.py
+├── docker-compose.yml              # Milvus stack
+├── pyproject.toml
+└── .env.example
+```
+
+## License
+
+MIT

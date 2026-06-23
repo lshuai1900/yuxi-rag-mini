@@ -75,11 +75,19 @@ class KnowledgeChunkRepository:
             )
             return {str(fid): int(cnt or 0) for fid, cnt in result.all()}
 
-    async def search_by_keyword(self, kb_id: str, query: str, limit: int = 10) -> list[KnowledgeChunkModel]:
-        """Simple keyword search using SQL LIKE. Fallback for BM25."""
+    async def search_by_keyword(self, kb_id: str, query: str, limit: int = 10) -> list[tuple[KnowledgeChunkModel, float]]:
+        """Keyword search using SQLite LIKE with multi-keyword matching and scoring.
+
+        Scoring is based on:
+        - Number of query keywords that match in the content
+        - Slight normalization by content length
+
+        Returns list of (chunk_model, score) tuples.
+        Keyword search currently uses SQLite fallback. Milvus BM25 is reserved for future enhancement.
+        """
         if not query or not query.strip():
             return []
-        keywords = [kw.strip() for kw in query.strip().split() if kw.strip()]
+        keywords = [kw.strip().lower() for kw in query.strip().split() if kw.strip()]
         if not keywords:
             return []
         async with async_session() as session:
@@ -91,7 +99,26 @@ class KnowledgeChunkRepository:
                 .where(KnowledgeChunkModel.kb_id == kb_id)
                 .where(or_(*conditions))
                 .order_by(KnowledgeChunkModel.chunk_index.asc())
-                .limit(limit)
+                .limit(limit * 3)  # Fetch more for better scoring
             )
             result = await session.execute(stmt)
-            return list(result.scalars().all())
+            chunks = list(result.scalars().all())
+
+        # Score each chunk based on keyword hit count and content length
+        scored = []
+        for chunk in chunks:
+            content_lower = chunk.content.lower()
+            hit_count = sum(1 for kw in keywords if kw in content_lower)
+            if hit_count == 0:
+                continue
+            # Base score: ratio of matched keywords to total keywords
+            base_score = hit_count / len(keywords)
+            # Slight length normalization: shorter content with same hits is slightly more relevant
+            content_len = len(chunk.content)
+            length_factor = 1.0 / (1.0 + (content_len / 5000.0))
+            score = base_score * (0.8 + 0.2 * length_factor)
+            scored.append((chunk, round(score, 4)))
+
+        # Sort by score descending, then by chunk_index for stability
+        scored.sort(key=lambda x: (-x[1], x[0].chunk_index))
+        return scored[:limit]

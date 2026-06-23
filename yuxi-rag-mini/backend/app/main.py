@@ -16,6 +16,7 @@ from app.api import kb_routes, file_routes, query_routes, health_routes
 async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME}...")
+    logger.info(f"Configuration:\n{settings.log_config()}")
     await init_db()
 
     # Register MilvusKB

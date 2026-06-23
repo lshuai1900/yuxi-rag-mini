@@ -10,10 +10,25 @@ class DocxParser(BaseParser):
         from docx import Document
         document = Document(file_path)
         blocks = []
+
+        # Process paragraphs in document order, skip empty ones
         for para in document.paragraphs:
             text = para.text.strip()
-            if text:
+            if not text:
+                continue
+            # Preserve heading style info if available
+            style_name = para.style.name if para.style else ""
+            if style_name.startswith("Heading"):
+                try:
+                    level = int(style_name.replace("Heading ", "").replace("Heading", ""))
+                    prefix = "#" * min(level, 6)
+                    blocks.append(f"{prefix} {text}")
+                except (ValueError, AttributeError):
+                    blocks.append(text)
+            else:
                 blocks.append(text)
+
+        # Process tables
         for table in document.tables:
             rows = []
             for row in table.rows:
@@ -29,7 +44,12 @@ class DocxParser(BaseParser):
                 normalized = row + [""] * (len(header) - len(row))
                 blocks.append(f"| {' | '.join(normalized[:len(header)])} |")
             blocks.append("")
+
         full_text = "\n\n".join(blocks).strip()
+
+        if not full_text:
+            raise ValueError(f"No extractable content found in {filename or 'DOCX file'}. The file may be empty.")
+
         return ParseResult(
             text=full_text,
             filename=filename,

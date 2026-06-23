@@ -12,10 +12,11 @@ class FileStatus:
     UPLOADED = "uploaded"
     PARSING = "parsing"
     PARSED = "parsed"
-    ERROR_PARSING = "error_parsing"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
     INDEXING = "indexing"
     INDEXED = "indexed"
-    ERROR_INDEXING = "error_indexing"
+    FAILED = "failed"
 
 
 class KnowledgeBaseException(Exception):
@@ -123,9 +124,12 @@ class KnowledgeBase(ABC):
                     db_files[file_id] = {
                         "file_id": file_id,
                         "filename": file_info.get("filename", ""),
+                        "file_type": file_info.get("file_type", ""),
                         "status": file_info.get("status", "uploaded"),
                         "chunk_count": int(file_info.get("chunk_count") or 0),
                         "token_count": int(file_info.get("token_count") or 0),
+                        "failed_reason": file_info.get("failed_reason", ""),
+                        "size": int(file_info.get("size") or 0),
                     }
             meta["files"] = db_files
         return meta
@@ -196,6 +200,8 @@ class KnowledgeBase(ABC):
             "processing_params": meta.get("processing_params"),
             "is_folder": meta.get("is_folder", False),
             "error_message": meta.get("error"),
+            "failed_reason": meta.get("failed_reason"),
+            "failed_stage": meta.get("failed_stage"),
         })
 
     async def _persist_kb(self, kb_id: str) -> None:
@@ -288,6 +294,8 @@ class KnowledgeBase(ABC):
                     "is_folder": getattr(record, "is_folder", False),
                     "error": getattr(record, "error_message", None),
                     "original_filename": getattr(record, "original_filename", None),
+                    "failed_reason": getattr(record, "failed_reason", None),
+                    "failed_stage": getattr(record, "failed_stage", None),
                 }
         logger.info(f"Loaded {self.kb_type} metadata: {len(self.databases_meta)} databases, {len(self.files_meta)} files")
 

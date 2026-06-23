@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_DIMENSION: int = 128
     EMBEDDING_BATCH_SIZE: int = 40
+    EMBEDDING_TIMEOUT: int = 60
     EMBEDDING_CHUNK_SIZE: int = 512
     EMBEDDING_CHUNK_OVERLAP: int = 50
 
@@ -40,6 +41,28 @@ class Settings(BaseSettings):
     RERANK_PROVIDER: str = "dummy"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    def log_config(self) -> str:
+        """Return a safe summary of the current config for startup logging."""
+        lines = [
+            f"  APP_NAME={self.APP_NAME}",
+            f"  DB_TYPE={self.DB_TYPE}",
+            f"  MILVUS_URI={self.MILVUS_URI}",
+            f"  STORAGE_TYPE={self.STORAGE_TYPE}",
+            f"  EMBEDDING_PROVIDER={self.EMBEDDING_PROVIDER}",
+            f"  EMBEDDING_MODEL={self.EMBEDDING_MODEL}",
+            f"  EMBEDDING_BASE_URL={self.EMBEDDING_BASE_URL}",
+            f"  EMBEDDING_DIMENSION={self.EMBEDDING_DIMENSION}",
+            f"  EMBEDDING_BATCH_SIZE={self.EMBEDDING_BATCH_SIZE}",
+            f"  EMBEDDING_TIMEOUT={self.EMBEDDING_TIMEOUT}",
+            f"  EMBEDDING_CHUNK_SIZE={self.EMBEDDING_CHUNK_SIZE}",
+            f"  EMBEDDING_CHUNK_OVERLAP={self.EMBEDDING_CHUNK_OVERLAP}",
+            f"  RERANK_PROVIDER={self.RERANK_PROVIDER}",
+        ]
+        # Do NOT log EMBEDDING_API_KEY
+        if self.EMBEDDING_PROVIDER == "fake":
+            lines.append("  WARNING: FakeEmbeddingProvider is active. Only for testing, not for real RAG!")
+        return "\n".join(lines)
 
 
 settings = Settings()

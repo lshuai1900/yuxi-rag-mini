@@ -22,18 +22,25 @@
         <thead>
           <tr>
             <th>Filename</th>
+            <th>Type</th>
             <th>Status</th>
             <th>Chunks</th>
+            <th>Size</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="file in files" :key="file.file_id">
             <td>{{ file.filename }}</td>
+            <td><span class="badge badge-info">{{ file.file_type || '-' }}</span></td>
             <td>
               <span class="badge" :class="statusClass(file.status)">{{ file.status }}</span>
+              <div v-if="file.failed_reason" style="font-size: 11px; color: #e74c3c; margin-top: 2px;">
+                {{ truncateError(file.failed_reason) }}
+              </div>
             </td>
             <td>{{ file.chunk_count || 0 }}</td>
+            <td>{{ formatSize(file.size) }}</td>
             <td style="display: flex; gap: 4px;">
               <button v-if="canIndex(file.status)" class="btn btn-primary btn-sm" @click="doIndex(file.file_id)" :disabled="indexing[file.file_id]">
                 {{ indexing[file.file_id] ? 'Indexing...' : 'Index' }}
@@ -61,7 +68,7 @@ async function loadFiles() {
   try {
     const res = await listFiles(props.kbId)
     files.value = Object.values(res.data)
-  } catch (e) {
+  } catch (e: any) {
     console.error('Failed to load files', e)
   }
 }
@@ -72,8 +79,8 @@ async function handleFiles(event: Event) {
   for (const file of Array.from(input.files)) {
     try {
       await uploadFile(props.kbId, file)
-    } catch (e) {
-      console.error('Upload failed', e)
+    } catch (e: any) {
+      alert(getErrorMessage(e, 'Upload failed'))
     }
   }
   await loadFiles()
@@ -85,15 +92,15 @@ async function handleDrop(event: DragEvent) {
   for (const file of Array.from(files)) {
     try {
       await uploadFile(props.kbId, file)
-    } catch (e) {
-      console.error('Upload failed', e)
+    } catch (e: any) {
+      alert(getErrorMessage(e, 'Upload failed'))
     }
   }
   await loadFiles()
 }
 
 function canIndex(status: string) {
-  return ['uploaded', 'parsed', 'error_parsing', 'error_indexing'].includes(status)
+  return ['uploaded', 'parsed', 'failed'].includes(status)
 }
 
 async function doIndex(fileId: string) {
@@ -102,8 +109,7 @@ async function doIndex(fileId: string) {
     await indexFile(props.kbId, fileId)
     await loadFiles()
   } catch (e: any) {
-    const msg = e?.response?.data?.detail || 'Index failed'
-    alert(msg)
+    alert(getErrorMessage(e, 'Index failed'))
   } finally {
     indexing.value[fileId] = false
   }
@@ -114,17 +120,36 @@ async function deleteFile_(fileId: string) {
   try {
     await deleteFile(props.kbId, fileId)
     await loadFiles()
-  } catch (e) {
-    console.error('Delete failed', e)
+  } catch (e: any) {
+    alert(getErrorMessage(e, 'Delete failed'))
   }
 }
 
 function statusClass(status: string) {
   if (status === 'indexed') return 'badge-success'
   if (status === 'uploaded' || status === 'parsed') return 'badge-info'
-  if (status?.startsWith('error')) return 'badge-danger'
-  if (status === 'parsing' || status === 'indexing') return 'badge-warning'
+  if (status === 'failed') return 'badge-danger'
+  if (['parsing', 'chunking', 'embedding', 'indexing'].includes(status)) return 'badge-warning'
   return 'badge-warning'
+}
+
+function formatSize(bytes: number | undefined): string {
+  if (!bytes) return '-'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function truncateError(msg: string | undefined): string {
+  if (!msg) return ''
+  return msg.length > 80 ? msg.substring(0, 80) + '...' : msg
+}
+
+function getErrorMessage(e: any, fallback: string): string {
+  const detail = e?.response?.data?.detail
+  if (typeof detail === 'object' && detail?.message) return detail.message
+  if (typeof detail === 'string') return detail
+  return fallback
 }
 
 watch(() => props.kbId, loadFiles, { immediate: true })

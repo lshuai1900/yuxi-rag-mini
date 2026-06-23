@@ -2,19 +2,35 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class ScoreDetail(BaseModel):
+    """Detailed score breakdown for hybrid search results."""
+    vector_score: float = 0.0
+    keyword_score: float = 0.0
+    final_score: float = 0.0
+    source: str = "vector"  # vector, keyword, hybrid
+
+
 class SearchResultSchema(BaseModel):
     chunk_id: str = Field(description="chunk ID")
     file_id: str = Field(default="", description="file ID")
     filename: str = Field(default="", description="source filename")
     content: str = Field(description="chunk content")
     score: float = Field(default=0.0, description="relevance score")
+    score_detail: ScoreDetail | None = Field(default=None, description="score breakdown for hybrid search")
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RerankInfo(BaseModel):
+    """Rerank information in query response."""
+    reranked: bool = False
+    reranker: str = ""
 
 
 class QueryResponse(BaseModel):
     query: str = Field(description="original query text")
     search_mode: str = Field(description="search mode used")
     results: list[SearchResultSchema] = Field(default_factory=list)
+    rerank: RerankInfo | None = None
 
 
 class QueryRequest(BaseModel):
@@ -52,6 +68,7 @@ class FileInfoSchema(BaseModel):
     size: int = 0
     chunk_count: int = 0
     token_count: int = 0
+    failed_reason: str = ""
     created_at: str | None = None
 
 
@@ -60,3 +77,11 @@ class IndexResponse(BaseModel):
     filename: str
     chunk_count: int
     status: str
+    failed_reason: str = ""
+
+
+class ErrorDetail(BaseModel):
+    """Unified error response format."""
+    code: str = "INTERNAL_ERROR"
+    message: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
