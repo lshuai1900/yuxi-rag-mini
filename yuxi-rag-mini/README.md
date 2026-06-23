@@ -1,19 +1,19 @@
 # Yuxi RAG Extracted
 
-A production-grade **RAG knowledge base system**, extracted and refactored from the [Yuxi](https://github.com/xerrors/Yuxi) project's RAG subsystem. Implements Milvus-native BM25 hybrid search, ragflow-like chunking, unified document parsing, and double-write consistency.
+从 [Yuxi](https://github.com/xerrors/Yuxi) 项目 RAG 子系统提取并重构的**生产级 RAG 知识库**。实现了 Milvus 原生 BM25 混合检索、ragflow-like 分块、统一文档解析和双写一致性。
 
-## Architecture
+## 架构总览
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    RAG Console (Vue 3)                      │
-│   KB Management / File Upload / Status Tracking / Query     │
+│                   RAG 控制台 (Vue 3)                         │
+│      知识库管理 / 文件上传 / 状态追踪 / 检索查询              │
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP API
 ┌────────────────────────────▼────────────────────────────────┐
-│                       FastAPI Backend                        │
+│                      FastAPI 后端                             │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ KB Routes │  │File Routes│  │Query Rts │  │Health Routes │ │
+│  │ KB 路由   │  │文件路由   │  │查询路由   │  │健康检查路由   │ │
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────────┘ │
 │       └──────────────┼─────────────┘                          │
 │              ┌───────▼────────┐                               │
@@ -22,32 +22,32 @@ A production-grade **RAG knowledge base system**, extracted and refactored from 
 │              └───────┬────────┘                               │
 │     ┌────────────────┼────────────────┐                      │
 │  ┌──▼──────────┐  ┌─▼────────────┐  ┌──▼──────────────┐   │
-│  │ Unified      │  │ragflow_like  │  │ Embedding        │   │
-│  │ Parser       │  │ Chunking     │  │ Provider         │   │
-│  │(PDF/DOCX/MD/ │  │ dispatcher   │  │(OpenAI/Ollama/   │   │
-│  │ TXT→Markdown)│  │ nlp/presets  │  │ HF/Fake)          │   │
+│  │ 统一解析器   │  │ragflow_like  │  │ Embedding        │   │
+│  │ Parser      │  │ 分块系统      │  │ Provider         │   │
+│  │(PDF/DOCX/MD │  │ dispatcher   │  │(OpenAI/Ollama/   │   │
+│  │ /TXT→MD)    │  │ nlp/presets  │  │ HF/Fake)          │   │
 │  └──────────────┘  └──────────────┘  └──────┬───────────┘   │
 │                                              │                │
 │  ┌──────────┐  ┌──────────┐                 │                │
 │  │ Reranker │  │ GraphRAG │                 │                │
-│  │ (Pluggable)│  │Reserved │                 │                │
+│  │ (可插拔)  │  │ (预留)   │                 │                │
 │  └──────────┘  └──────────┘                 │                │
 └────────────────────────────────────────────┼────────────────┘
                     ┌─────────────────────────┼─────────────────┐
             ┌───────▼──────┐        ┌────────▼────────┐  ┌──────▼──────┐
-            │ Milvus (per- │        │ SQLite /         │  │ Local /     │
-            │ KB collection│        │ PostgreSQL       │  │ MinIO       │
-            │ + BM25 sparse│        │ + chunk repo     │  │ Storage     │
+            │ Milvus (每KB │        │ SQLite /        │  │ 本地 /      │
+            │ 独立Collection│        │ PostgreSQL      │  │ MinIO 存储  │
+            │ + BM25稀疏向量│        │ + chunk仓库     │  │             │
             └──────────────┘        └──────────────────┘  └─────────────┘
 ```
 
-## Core Features
+## 核心特性
 
-### Milvus Native Hybrid Search
+### Milvus 原生混合检索
 
-Uses Milvus's built-in `FunctionType.BM25` with `SPARSE_FLOAT_VECTOR` and `SPARSE_INVERTED_INDEX` for native BM25 keyword search. Combined dense vector search via `AnnSearchRequest` + `WeightedRanker` for server-side fusion.
+使用 Milvus 内置 `FunctionType.BM25` 配合 `SPARSE_FLOAT_VECTOR` 和 `SPARSE_INVERTED_INDEX` 实现原生 BM25 关键词检索。通过 `AnnSearchRequest` + `WeightedRanker` 实现服务端稠密/稀疏向量融合：
 
-```
+```python
 vector_request = AnnSearchRequest(embedding, "embedding", COSINE)
 bm25_request   = AnnSearchRequest(query_text, "content_sparse", BM25)
 results = collection.hybrid_search(
@@ -56,60 +56,60 @@ results = collection.hybrid_search(
 )
 ```
 
-### Retrieval Configuration (`MilvusRetrievalConfig`)
+### 检索配置 (`MilvusRetrievalConfig`)
 
-18-field dataclass controlling search behavior:
+18 字段数据类，精细控制检索行为：
 
-| Field | Default | Description |
-|-------|---------|-------------|
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
 | `search_mode` | `hybrid` | vector / keyword / hybrid |
-| `final_top_k` | 10 | Final result count |
-| `similarity_threshold` | 0.0 | Minimum score filter |
-| `bm25_top_k` | 20 | BM25 recall candidates |
-| `vector_weight` | 0.7 | Dense vector weight in fusion |
-| `bm25_weight` | 0.3 | BM25 weight in fusion |
-| `bm25_drop_ratio_search` | 0.2 | BM25 drop ratio for low-quality terms |
-| `recall_top_k` | 20 | Pre-fusion candidate count |
-| `use_reranker` | false | Enable reranking step |
+| `final_top_k` | 10 | 最终返回结果数 |
+| `similarity_threshold` | 0.0 | 最低相似度过滤 |
+| `bm25_top_k` | 20 | BM25 召回候选数 |
+| `vector_weight` | 0.7 | 稠密向量融合权重 |
+| `bm25_weight` | 0.3 | BM25 融合权重 |
+| `bm25_drop_ratio_search` | 0.2 | BM25 低质量词项丢弃比例 |
+| `recall_top_k` | 20 | 融合前候选数 |
+| `use_reranker` | false | 启用重排序 |
 
-Plus graph retrieval fields reserved: `use_graph_retrieval`, `graph_entity_top_k`, `graph_triple_top_k`, `graph_max_nodes`, `graph_top_k`, `graph_weight`, `ppr_damping`.
+图检索预留字段：`use_graph_retrieval`, `graph_entity_top_k`, `graph_triple_top_k`, `graph_max_nodes`, `graph_top_k`, `graph_weight`, `ppr_damping`。
 
-### Collection-per-KB Design
+### 每个知识库独立 Collection
 
-Each knowledge base gets its own Milvus collection with:
+每个知识库拥有独立的 Milvus Collection，Schema 包含：
 
-- **Schema**: id (PK), content (Chinese-analyzed VARCHAR), chunk_id, file_id, chunk_index, embedding (FLOAT_VECTOR), content_sparse (SPARSE_FLOAT_VECTOR via BM25 function)
-- **Dense index**: IVF_FLAT / COSINE
-- **Sparse index**: SPARSE_INVERTED_INDEX / BM25 (DAAT_MAXSCORE)
+- **字段**：id (主键), content (中文分词 VARCHAR), chunk_id, file_id, chunk_index, embedding (FLOAT_VECTOR), content_sparse (SPARSE_FLOAT_VECTOR，由 BM25 函数生成)
+- **稠密索引**：IVF_FLAT / COSINE
+- **稀疏索引**：SPARSE_INVERTED_INDEX / BM25 (DAAT_MAXSCORE)
 
-### File Lifecycle
+### 文件生命周期
 
 ```
 uploaded → parsing → parsed → indexing → indexed
                      ↘ error_parsing    ↘ error_indexing
 ```
 
-Two-phase pipeline:
-1. **parse_file**: source file → markdown (via unified parser) → save `markdown_file` to storage
-2. **index_file**: read `markdown_file` → chunk (ragflow_like) → embed → **double-write** to Milvus + PG
+两阶段流水线：
+1. **parse_file**：源文件 → Markdown（统一解析器）→ 保存 `markdown_file` 到存储
+2. **index_file**：读取 `markdown_file` → 分块（ragflow_like）→ 向量化 → **双写** Milvus + PG
 
-### Double-Write Consistency
+### 双写一致性
 
-Milvus insert and PostgreSQL upsert run concurrently. On failure, both stores are rolled back:
+Milvus 写入和 PostgreSQL upsert 并发执行，任一失败则双向回滚：
 
 ```python
 pg_task = asyncio.create_task(chunk_repo.batch_upsert(records))
 milvus_task = asyncio.create_task(collection.insert(entities))
 results = await asyncio.gather(pg_task, milvus_task, return_exceptions=True)
 if errors:
-    # Rollback: delete from PG + Milvus
+    # 回滚：删除 PG + Milvus 中的数据
     await chunk_repo.delete_by_file_id(file_id)
     await collection.delete(f'file_id == "{file_id}"')
 ```
 
-### Query Offload
+### 查询卸载
 
-All blocking Milvus queries are offloaded to thread pools with semaphore-based concurrency control (default: 8 concurrent):
+所有阻塞式 Milvus 查询通过线程池卸载，信号量控制并发（默认 8 路）：
 
 ```python
 async def _run_milvus_query_io(func, *args, **kwargs):
@@ -121,14 +121,14 @@ async def _run_milvus_query_io(func, *args, **kwargs):
         semaphore.release()
 ```
 
-### ragflow-like Chunking System
+### ragflow-like 分块系统
 
-Ported from Yuxi's `chunking/ragflow_like/` module:
+从 Yuxi 的 `chunking/ragflow_like/` 模块移植：
 
 ```
 dispatcher.py → chunk_markdown(markdown, file_id, filename, params) → list[dict]
     ├── presets.py → resolve_chunk_processing_params(preset_id)
-    │   Presets: general (512), qa (512), book (1024), laws (2048), semantic (512), separator (512)
+    │   预设：general (512), qa (512), book (1024), laws (2048), semantic (512), separator (512)
     └── parsers/general.py → chunk_markdown(md_content) → list[str]
         └── nlp.py → naive_merge(sections, token_limit, delimiter, overlap)
                   ├── hard_split_by_token_limit(text, limit, hard_limit)
@@ -137,50 +137,50 @@ dispatcher.py → chunk_markdown(markdown, file_id, filename, params) → list[d
                   └── count_tokens(text) → int
 ```
 
-Chunk records include position metadata: `start_char_pos`, `end_char_pos`, `start_token_pos`, `end_token_pos`.
+分块记录包含位置元数据：`start_char_pos`, `end_char_pos`, `start_token_pos`, `end_token_pos`。
 
-### Unified Document Parser
+### 统一文档解析器
 
-Single entry point that converts any supported file format to Markdown:
+单一入口，将任意支持格式转换为 Markdown：
 
 ```python
-# Parse file → markdown string
+# 解析文件 → Markdown 字符串
 markdown = await Parser.aparse(file_path)
 
-# Parse file → structured result
+# 解析文件 → 结构化结果
 result = await parse_source_to_markdown(file_path, params={"filename": "doc.pdf"})
-# Returns MarkdownParseResult(markdown="...", file_ext=".pdf", artifacts={...})
+# 返回 MarkdownParseResult(markdown="...", file_ext=".pdf", artifacts={...})
 ```
 
-Supported formats: PDF (PyMuPDF), DOCX (python-docx), Markdown, TXT. Unsupported types fall back to plain text reading.
+支持格式：PDF (PyMuPDF)、DOCX (python-docx)、Markdown、TXT。不支持的格式回退为纯文本读取。
 
-Optional adapter pattern for heavy external processors (MinerU, PaddleX, OCR) — loaded lazily, doesn't break startup if unavailable.
+可选适配器模式支持重型外部处理器（MinerU、PaddleX、OCR）——懒加载，不可用时不影响启动。
 
-### GraphRAG Fields Reserved
+### GraphRAG 字段预留
 
-`KnowledgeChunkModel` includes graph fields (not implemented):
-- `graph_indexed` (Boolean)
-- `ent_ids` (JSON list of entity IDs)
-- `tags` (JSON list of tags)
-- `extraction_result` (JSON graph extraction output)
+`KnowledgeChunkModel` 包含图字段（未实现）：
+- `graph_indexed` (Boolean) — 是否已建图索引
+- `ent_ids` (JSON) — 实体 ID 列表
+- `tags` (JSON) — 标签列表
+- `extraction_result` (JSON) — 图抽取结果
 
-Repository methods: `mark_graph_indexed()`, `reset_graph_state_by_kb_id()`, `list_unindexed_for_graph()`.
+仓库方法：`mark_graph_indexed()`, `reset_graph_state_by_kb_id()`, `list_unindexed_for_graph()`。
 
-## Tech Stack
+## 技术栈
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | FastAPI, Pydantic v2, SQLAlchemy (async) |
-| Frontend | Vue 3, Vite, TypeScript (RAG Console dark theme) |
-| Vector DB | Milvus Lite / Standalone (BM25 + Dense Vector) |
-| Metadata DB | SQLite (aiosqlite) / PostgreSQL (asyncpg) |
-| File Storage | Local filesystem / MinIO |
-| Embedding | OpenAI-compatible, Ollama, HuggingFace, Fake (testing) |
-| Document Parsing | PyMuPDF, python-docx, custom MD/TXT parsers |
+| 层级 | 技术 |
+|------|------|
+| 后端 | FastAPI, Pydantic v2, SQLAlchemy (async) |
+| 前端 | Vue 3, Vite, TypeScript（RAG 控制台暗色主题） |
+| 向量数据库 | Milvus Lite / Standalone（BM25 + 稠密向量） |
+| 元数据数据库 | SQLite (aiosqlite) / PostgreSQL (asyncpg) |
+| 文件存储 | 本地文件系统 / MinIO |
+| 向量化 | OpenAI 兼容接口, Ollama, HuggingFace, Fake（测试用） |
+| 文档解析 | PyMuPDF, python-docx, 自定义 MD/TXT 解析器 |
 
-## Quick Start
+## 快速开始
 
-### Option A: Zero Dependencies (Milvus Lite + SQLite)
+### 方式 A：零依赖启动（Milvus Lite + SQLite）
 
 ```bash
 cd backend
@@ -191,7 +191,7 @@ uvicorn app.main:app --reload --port 8000
 cd ../frontend && npm install && npm run dev
 ```
 
-### Option B: Full Stack (Docker + Milvus Standalone)
+### 方式 B：完整部署（Docker + Milvus Standalone）
 
 ```bash
 docker compose up -d milvus
@@ -199,31 +199,31 @@ cd backend && pip install -e .. && uvicorn app.main:app --port 8000
 cd ../frontend && npm install && npm run dev
 ```
 
-## API Examples
+## API 示例
 
 ```bash
-# Create KB
+# 创建知识库
 curl -X POST http://localhost:8000/api/kb \
   -H "Content-Type: application/json" \
-  -d '{"name": "My KB", "description": ""}'
+  -d '{"name": "我的知识库", "description": ""}'
 
-# Upload file
+# 上传文件
 curl -X POST http://localhost:8000/api/kb/{kb_id}/files/upload -F "file=@doc.pdf"
 
-# Parse (file → markdown)
+# 解析（文件 → Markdown）
 curl -X POST http://localhost:8000/api/kb/{kb_id}/files/{file_id}/parse
 
-# Index (markdown → chunk → embed → Milvus+PG)
+# 索引（Markdown → 分块 → 向量化 → 写入 Milvus+PG）
 curl -X POST http://localhost:8000/api/kb/{kb_id}/files/{file_id}/index
 
-# One-step ingest (parse + index)
+# 一键入库（解析 + 索引）
 curl -X POST http://localhost:8000/api/kb/{kb_id}/files/{file_id}/ingest
 
-# Query with retrieval config
+# 带检索配置的查询
 curl -X POST http://localhost:8000/api/kb/{kb_id}/query \
   -H "Content-Type: application/json" \
   -d '{
-    "query": "What is machine learning?",
+    "query": "什么是机器学习？",
     "retrieval_config": {
       "search_mode": "hybrid",
       "final_top_k": 10,
@@ -236,84 +236,82 @@ curl -X POST http://localhost:8000/api/kb/{kb_id}/query \
   }'
 ```
 
-## Configuration
+## 配置项
 
-Key settings (see `.env.example`):
+关键环境变量（详见 `.env.example`）：
 
-| Variable | Default | Description |
-|----------|---------|-------------|
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
 | `EMBEDDING_PROVIDER` | `fake` | openai_compatible / ollama / huggingface / fake |
-| `EMBEDDING_MODEL` | bge-m3 | Model name |
-| `EMBEDDING_DIMENSION` | 128 | Vector dimension |
-| `MILVUS_URI` | data/milvus.db | Connection URI |
-| `DEFAULT_SEARCH_MODE` | hybrid | Default query mode |
-| `DEFAULT_VECTOR_WEIGHT` | 0.7 | Hybrid fusion vector weight |
-| `DEFAULT_BM25_WEIGHT` | 0.3 | Hybrid fusion BM25 weight |
-| `MILVUS_QUERY_OFFLOAD_SEMAPHORE` | 8 | Max concurrent Milvus queries |
+| `EMBEDDING_MODEL` | bge-m3 | 向量化模型名称 |
+| `EMBEDDING_DIMENSION` | 128 | 向量维度 |
+| `MILVUS_URI` | data/milvus.db | Milvus 连接地址 |
+| `DEFAULT_SEARCH_MODE` | hybrid | 默认检索模式 |
+| `DEFAULT_VECTOR_WEIGHT` | 0.7 | 混合检索向量权重 |
+| `DEFAULT_BM25_WEIGHT` | 0.3 | 混合检索 BM25 权重 |
+| `MILVUS_QUERY_OFFLOAD_SEMAPHORE` | 8 | Milvus 最大并发查询数 |
 
-> **WARNING**: `fake` embedding generates deterministic but meaningless vectors. Use real providers for production.
+> **注意**：`fake` 向量化生成确定性但无意义的向量，仅用于测试流水线，不可用于真实 RAG 场景。
 
-## Testing
+## 测试
 
 ```bash
 cd backend && python -m pytest ../tests/ -v
 ```
 
-57 tests covering: retrieval config, ragflow chunking, unified parser, file status, import checks, Milvus schema design, chunk model, parser, chunker.
+57 个测试覆盖：检索配置、ragflow 分块、统一解析器、文件状态、模块导入检查、Milvus Schema 设计、chunk 模型、解析器、分块器。
 
-## Project Structure
+## 项目结构
 
 ```
 yuxi-rag-mini/
 ├── backend/app/
-│   ├── api/                        # Route handlers
-│   ├── core/config.py              # Settings (18+ config vars)
+│   ├── api/                          # 路由处理器
+│   ├── core/config.py                # 配置（18+ 配置项）
 │   └── rag/
-│       ├── base.py                 # KnowledgeBase ABC + FileStatus (7 states)
-│       ├── schemas.py              # MilvusRetrievalConfig (18 fields) + API models
-│       ├── backends/milvus_kb.py   # MilvusKB: BM25, WeightedRanker, double-write
+│       ├── base.py                   # KnowledgeBase ABC + FileStatus（7 状态）
+│       ├── schemas.py                # MilvusRetrievalConfig（18 字段）+ API 模型
+│       ├── backends/milvus_kb.py     # MilvusKB：BM25、WeightedRanker、双写
 │       ├── parser/
-│       │   ├── unified.py           # Parser.aparse() → markdown string
-│       │   ├── adapter.py           # Optional processor adapters (lazy load)
-│       │   └── factory.py           # parse_file dispatcher
+│       │   ├── unified.py            # Parser.aparse() → Markdown 字符串
+│       │   ├── adapter.py            # 可选处理器适配器（懒加载）
+│       │   └── factory.py            # parse_file 分发器
 │       ├── chunking/
-│       │   └── ragflow_like/        # Ported from Yuxi
-│       │       ├── dispatcher.py    # Main entry: chunk_markdown()
-│       │       ├── nlp.py           # naive_merge, hard_split, count_tokens
-│       │       ├── presets.py       # 6 preset configs
-│       │       └── parsers/general.py  # Markdown section splitter
+│       │   └── ragflow_like/         # 从 Yuxi 移植
+│       │       ├── dispatcher.py     # 主入口：chunk_markdown()
+│       │       ├── nlp.py            # naive_merge, hard_split, count_tokens
+│       │       ├── presets.py        # 6 种分块预设
+│       │       └── parsers/general.py  # Markdown 章节分割器
 │       ├── repositories/
-│       │   └── chunk_repository.py  # batch_upsert, graph methods
-│       ├── storage/models.py        # KnowledgeChunkModel (+ graph fields)
-│       └── providers/               # Embedding + reranker pluggable
-├── frontend/src/                    # Vue 3 RAG Console (dark theme)
-├── tests/                           # 9 test files, 57 tests
+│       │   └── chunk_repository.py   # batch_upsert、图相关方法
+│       ├── storage/models.py         # KnowledgeChunkModel（+ 图字段）
+│       └── providers/                # 向量化 + 重排序（可插拔）
+├── frontend/src/                     # Vue 3 RAG 控制台（暗色主题）
+├── tests/                            # 9 个测试文件，57 个测试
 ├── pyproject.toml
 └── .env.example
 ```
 
-## Alignment with Yuxi RAG Subsystem
+## 与 Yuxi RAG 子系统对齐情况
 
-This project is extracted from the Yuxi project's RAG subsystem with these alignment points:
+| 组件 | Yuxi 源码 | 对齐状态 |
+|------|-----------|----------|
+| MilvusKB 核心 | `implementations/milvus.py` | BM25 Schema、混合检索、查询卸载、双写 |
+| 检索配置 | `schemas.py` | 18 字段 MilvusRetrievalConfig |
+| 文件生命周期 | `base.py` | 7 状态机（error_parsing/error_indexing） |
+| 分块系统 | `chunking/ragflow_like/` | dispatcher、nlp、presets、general 解析器 |
+| 统一解析器 | `parser/unified.py` | aparse → Markdown、可选适配器 |
+| 仓库层 | `repositories/chunk_repository.py` | batch_upsert、图字段 |
+| GraphRAG 字段 | model + repository | 预留（未实现） |
 
-| Component | Yuxi Source | Alignment Status |
-|-----------|------------|------------------|
-| MilvusKB core | `implementations/milvus.py` | BM25 schema, hybrid search, query offload, double-write |
-| Retrieval Config | `schemas.py` | 18-field MilvusRetrievalConfig |
-| File Lifecycle | `base.py` | 7-state machine (error_parsing/error_indexing) |
-| Chunking | `chunking/ragflow_like/` | dispatcher, nlp, presets, general parser |
-| Unified Parser | `parser/unified.py` | aparse → markdown, optional adapters |
-| Repository | `repositories/chunk_repository.py` | batch_upsert, graph fields |
-| GraphRAG fields | model + repository | Reserved (not implemented) |
+## 已知限制
 
-## Limitations
+- **无用户/认证系统** — 单用户控制台
+- **GraphRAG** — 接口预留，未实现
+- **Reranker** — 默认 DummyReranker；可插拔真实重排序模型
+- **OCR** — 适配器模式已就绪，默认未配置 OCR 提供者
+- **多租户** — 未实现
 
-- **No user/auth system** — single-user console
-- **GraphRAG** — interface reserved, not implemented
-- **Reranker** — DummyReranker by default; real reranker can be plugged in
-- **OCR** — adapter pattern exists but no OCR provider configured by default
-- **Multi-tenancy** — not implemented
-
-## License
+## 许可证
 
 MIT
