@@ -1,5 +1,5 @@
 from typing import Any
-from sqlalchemy import select, delete, func, or_
+from sqlalchemy import select, delete, update, func, or_
 from app.rag.storage.database import async_session
 from app.rag.storage.models import KnowledgeChunkModel
 
@@ -122,3 +122,39 @@ class KnowledgeChunkRepository:
         # Sort by score descending, then by chunk_index for stability
         scored.sort(key=lambda x: (-x[1], x[0].chunk_index))
         return scored[:limit]
+
+    async def mark_graph_indexed(self, chunk_ids: list[str]) -> int:
+        """Mark chunks as graph-indexed."""
+        if not chunk_ids:
+            return 0
+        async with async_session() as session:
+            result = await session.execute(
+                update(KnowledgeChunkModel)
+                .where(KnowledgeChunkModel.chunk_id.in_(chunk_ids))
+                .values(graph_indexed=True)
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def reset_graph_state_by_kb_id(self, kb_id: str) -> int:
+        """Reset graph state for all chunks in a KB."""
+        async with async_session() as session:
+            result = await session.execute(
+                update(KnowledgeChunkModel)
+                .where(KnowledgeChunkModel.kb_id == kb_id)
+                .values(graph_indexed=False, ent_ids=None, tags=None, extraction_result=None)
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def list_unindexed_for_graph(self, kb_id: str, limit: int = 100) -> list[KnowledgeChunkModel]:
+        """List chunks not yet indexed for graph."""
+        async with async_session() as session:
+            result = await session.execute(
+                select(KnowledgeChunkModel)
+                .where(KnowledgeChunkModel.kb_id == kb_id)
+                .where(KnowledgeChunkModel.graph_indexed == False)
+                .order_by(KnowledgeChunkModel.chunk_index.asc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())

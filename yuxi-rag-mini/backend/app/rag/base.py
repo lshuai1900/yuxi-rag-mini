@@ -12,11 +12,10 @@ class FileStatus:
     UPLOADED = "uploaded"
     PARSING = "parsing"
     PARSED = "parsed"
-    CHUNKING = "chunking"
-    EMBEDDING = "embedding"
+    ERROR_PARSING = "error_parsing"
     INDEXING = "indexing"
     INDEXED = "indexed"
-    FAILED = "failed"
+    ERROR_INDEXING = "error_indexing"
 
 
 class KnowledgeBaseException(Exception):
@@ -162,6 +161,11 @@ class KnowledgeBase(ABC):
             self.databases_meta[kb_id].setdefault("metadata", {})["stats"] = stats
             await self._persist_kb(kb_id)
         return stats
+
+    @staticmethod
+    def is_terminal_status(status: str) -> bool:
+        """Check if a status is terminal (won't auto-transition)."""
+        return status in (FileStatus.INDEXED, FileStatus.ERROR_PARSING, FileStatus.ERROR_INDEXING)
 
     @staticmethod
     def build_search_output(kb_id: str, retrieval_results: list[dict]) -> dict:

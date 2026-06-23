@@ -1,23 +1,27 @@
 import asyncio
 import json
-import math
 import os
+from dataclasses import asdict
 from typing import Any
 
 from pymilvus import (
+    AnnSearchRequest,
     Collection,
     CollectionSchema,
     DataType,
     FieldSchema,
+    Function,
+    FunctionType,
+    WeightedRanker,
     connections,
     db,
     utility,
 )
 
 from app.rag.base import FileStatus, KnowledgeBase
-from app.rag.chunking.text_chunker import ChunkResult, chunk_text, count_tokens
-from app.rag.chunking.markdown_chunker import chunk_markdown
-from app.rag.parser.factory import parse_file
+from app.rag.chunking.ragflow_like import chunk_markdown as ragflow_chunk_markdown
+from app.rag.parser.unified import parse_source_to_markdown
+from app.rag.schemas import MilvusRetrievalConfig
 from app.rag.providers.embedding import create_embedding_provider
 from app.rag.providers.rerank import create_reranker
 from app.rag.repositories.chunk_repository import KnowledgeChunkRepository
@@ -27,11 +31,34 @@ from app.core.logging import logger
 
 VECTOR_METRIC_TYPE = "COSINE"
 
+# Query offload semaphore for limiting concurrent Milvus queries
+_query_semaphores: dict[str, asyncio.Semaphore] = {}
+
+
+def _get_milvus_query_offload_semaphore() -> asyncio.Semaphore:
+    """Get or create a semaphore for Milvus query offloading."""
+    key = "default"
+    if key not in _query_semaphores:
+        _query_semaphores[key] = asyncio.Semaphore(settings.MILVUS_QUERY_OFFLOAD_SEMAPHORE)
+    return _query_semaphores[key]
+
+
+async def _run_milvus_query_io(func, /, *args, **kwargs):
+    """Run a blocking Milvus query in a thread pool with semaphore-based concurrency control."""
+    semaphore = _get_milvus_query_offload_semaphore()
+    await semaphore.acquire()
+    try:
+        task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        result = await task
+        return result
+    finally:
+        semaphore.release()
+
 
 class MilvusKB(KnowledgeBase):
     kb_type = "milvus"
     name = "Milvus"
-    description = "Milvus-based vector knowledge base"
+    description = "Milvus-based vector knowledge base with native BM25 and hybrid search"
 
     def __init__(self, work_dir: str, **kwargs):
         super().__init__(work_dir)
@@ -89,23 +116,88 @@ class MilvusKB(KnowledgeBase):
             raise
 
     def _create_new_collection(self, collection_name: str, embedding_dim: int, kb_id: str) -> Collection:
+        """Create a new Milvus collection with BM25 sparse vector support.
+
+        Schema aligns with Yuxi's milvus.py implementation:
+        - content field with Chinese analyzer for BM25
+        - content_sparse SPARSE_FLOAT_VECTOR via FunctionType.BM25
+        - embedding FLOAT_VECTOR for dense vectors
+        """
         fields = [
-            FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=128, is_primary=True),
-            FieldSchema(name="kb_id", dtype=DataType.VARCHAR, max_length=80),
+            FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=100, is_primary=True),
+            FieldSchema(
+                name="content", dtype=DataType.VARCHAR, max_length=65535,
+                enable_analyzer=True, analyzer_params={"type": "chinese"},
+            ),
+            FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=100),
             FieldSchema(name="file_id", dtype=DataType.VARCHAR, max_length=100),
-            FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=128),
-            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-            FieldSchema(name="filename", dtype=DataType.VARCHAR, max_length=512),
             FieldSchema(name="chunk_index", dtype=DataType.INT64),
-            FieldSchema(name="metadata_json", dtype=DataType.VARCHAR, max_length=65535),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=embedding_dim),
+            FieldSchema(name="content_sparse", dtype=DataType.SPARSE_FLOAT_VECTOR),
         ]
-        schema = CollectionSchema(fields=fields, description=f"KB collection for {kb_id}")
+
+        # BM25 function: generates sparse vector from text content
+        bm25_function = Function(
+            name="content_bm25",
+            input_field_names=["content"],
+            output_field_names=["content_sparse"],
+            function_type=FunctionType.BM25,
+        )
+
+        schema = CollectionSchema(
+            fields=fields,
+            functions=[bm25_function],
+            description=f"KB collection for {kb_id} (with BM25)",
+            enable_dynamic_field=False,
+        )
         collection = Collection(name=collection_name, schema=schema, using=self.connection_alias)
-        index_params = {"metric_type": VECTOR_METRIC_TYPE, "index_type": "FLAT"}
-        collection.create_index("embedding", index_params, index_name="embedding_idx")
-        logger.info(f"Created Milvus collection: {collection_name}")
+
+        # Dense vector index (IVF_FLAT or HNSW depending on scale; use IVF_FLAT for compatibility)
+        dense_index_params = {
+            "metric_type": VECTOR_METRIC_TYPE,
+            "index_type": "IVF_FLAT",
+            "params": {"nlist": 128},
+        }
+        collection.create_index("embedding", dense_index_params, index_name="embedding_idx")
+
+        # Sparse vector index for BM25 (SPARSE_INVERTED_INDEX with DAAT_MAXSCORE)
+        sparse_index_params = {
+            "metric_type": "BM25",
+            "index_type": "SPARSE_INVERTED_INDEX",
+            "params": {"inverted_index_algo": "DAAT_MAXSCORE"},
+        }
+        collection.create_index("content_sparse", sparse_index_params, index_name="sparse_idx")
+
+        logger.info(f"Created Milvus collection with BM25 support: {collection_name} (dim={embedding_dim})")
         return collection
+
+    @staticmethod
+    def _validate_collection_schema(collection: Collection, expected_dim: int) -> bool:
+        """Validate that collection schema supports BM25 and matches embedding dimension.
+
+        Returns True if valid, False otherwise.
+        """
+        try:
+            schema = collection.schema
+            has_bm25 = any(
+                func.function_type == FunctionType.BM25
+                for func in (schema.functions or [])
+            )
+            if not has_bm25:
+                logger.warning("Collection does not have BM25 function")
+
+            for field in schema.fields:
+                if field.name == "embedding":
+                    actual_dim = field.params.get("dim")
+                    if actual_dim != expected_dim:
+                        logger.warning(f"Embedding dim mismatch: collection={actual_dim}, config={expected_dim}")
+                        return False
+                    break
+
+            return True
+        except Exception as e:
+            logger.error(f"Schema validation error: {e}")
+            return False
 
     async def _initialize_kb_instance(self, instance: Any) -> None:
         try:
@@ -113,7 +205,11 @@ class MilvusKB(KnowledgeBase):
         except Exception as e:
             logger.warning(f"Failed to load collection: {e}")
 
-    async def _get_milvus_collection(self, kb_id: str):
+    async def _get_or_create_collection(self, kb_id: str):
+        """Get existing collection or create new one for kb_id.
+
+        Each KB gets its own collection (not shared).
+        """
         if kb_id in self.collections:
             return self.collections[kb_id]
         if kb_id not in self.databases_meta:
@@ -128,43 +224,6 @@ class MilvusKB(KnowledgeBase):
             if not self._connected:
                 raise RuntimeError(f"Milvus is not connected. Please check your Milvus configuration (URI: {self.milvus_uri}). Original error: {e}")
             return None
-
-    def _do_chunking(self, text: str, file_id: str, kb_id: str, filename: str,
-                     pages: list[dict] | None = None, parse_metadata: dict | None = None) -> list[ChunkResult]:
-        ext = os.path.splitext(filename)[1].lower() if filename else ""
-        chunk_size = settings.EMBEDDING_CHUNK_SIZE
-        chunk_overlap = settings.EMBEDDING_CHUNK_OVERLAP
-
-        base_metadata = {}
-        if parse_metadata:
-            base_metadata.update(parse_metadata)
-        if pages:
-            base_metadata["has_pages"] = True
-
-        if ext in [".md", ".markdown"]:
-            chunks = chunk_markdown(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
-                                    file_id=file_id, kb_id=kb_id, filename=filename, metadata=base_metadata)
-        else:
-            chunks = chunk_text(text, chunk_size=chunk_size, chunk_overlap=chunk_overlap,
-                               file_id=file_id, kb_id=kb_id, filename=filename, metadata=base_metadata)
-
-        # If we have page info, try to assign page numbers to chunks
-        if pages:
-            for chunk in chunks:
-                page_num = self._find_page_for_chunk(chunk.content, pages)
-                if page_num is not None:
-                    chunk.metadata["page_number"] = page_num
-
-        return chunks
-
-    @staticmethod
-    def _find_page_for_chunk(chunk_content: str, pages: list[dict]) -> int | None:
-        """Find the page number for a chunk by checking which page contains its text."""
-        for page in pages:
-            page_text = page.get("text", "")
-            if page_text and chunk_content[:50] in page_text:
-                return page.get("page_number")
-        return None
 
     async def add_file_record(self, kb_id: str, item: str, params: dict | None = None,
                               operator_id: str | None = None) -> dict:
@@ -193,6 +252,14 @@ class MilvusKB(KnowledgeBase):
         return metadata
 
     async def parse_file(self, kb_id: str, file_id: str, operator_id: str | None = None) -> dict:
+        """Parse file to markdown and save markdown_file.
+
+        Aligns with Yuxi's KnowledgeBase.parse_file():
+        1. Status UPLOADED -> PARSING
+        2. Parse source to markdown using unified parser
+        3. Save markdown_file to storage
+        4. Status PARSING -> PARSED (or ERROR_PARSING on failure)
+        """
         if file_id not in self.files_meta:
             raise ValueError(f"File {file_id} not found")
         file_meta = self.files_meta[file_id]
@@ -204,6 +271,7 @@ class MilvusKB(KnowledgeBase):
             file_path = file_meta.get("path")
             storage = get_file_storage()
 
+            # Resolve actual path
             if file_path.startswith("local://"):
                 actual_path = storage.get_local_path(file_path.replace("local://", ""))
             elif file_path.startswith("minio://"):
@@ -217,28 +285,30 @@ class MilvusKB(KnowledgeBase):
                 actual_path = storage.get_local_path(file_path)
 
             filename = file_meta.get("filename", "")
-            parse_result = await parse_file(actual_path, filename=filename)
+
+            # Use unified parser: converts file to markdown
+            parse_result = await parse_source_to_markdown(actual_path, params={"filename": filename})
 
             # Check for empty parse result
-            if not parse_result.text or not parse_result.text.strip():
+            if not parse_result.markdown or not parse_result.markdown.strip():
                 raise ValueError(f"No extractable content found in {filename}. The file may be empty or contain only non-text content.")
 
-            # Save parsed content
+            # Save parsed markdown content
             parsed_object_name = f"{kb_id}/parsed/{file_id}.md"
-            await storage.upload_file(parsed_object_name, parse_result.text.encode("utf-8"), "text/markdown")
+            await storage.upload_file(parsed_object_name, parse_result.markdown.encode("utf-8"), "text/markdown")
 
             self.files_meta[file_id]["status"] = FileStatus.PARSED
             self.files_meta[file_id]["markdown_file"] = parsed_object_name
             self.files_meta[file_id]["parse_metadata"] = {
-                "file_type": parse_result.file_type,
-                "total_pages": len(parse_result.pages),
-                "pages": parse_result.pages,
+                "file_ext": parse_result.file_ext,
+                "artifacts": parse_result.artifacts,
             }
             await self._persist_file(file_id)
             return self.files_meta[file_id]
+
         except Exception as e:
             logger.error(f"Failed to parse file {file_id}: {e}")
-            self.files_meta[file_id]["status"] = FileStatus.FAILED
+            self.files_meta[file_id]["status"] = FileStatus.ERROR_PARSING
             self.files_meta[file_id]["failed_reason"] = str(e)
             self.files_meta[file_id]["failed_stage"] = "parsing"
             self.files_meta[file_id]["failed_at"] = _utc_now()
@@ -246,13 +316,23 @@ class MilvusKB(KnowledgeBase):
             raise
 
     async def index_file(self, kb_id: str, file_id: str, operator_id: str | None = None) -> dict:
+        """Index a parsed file: read markdown -> chunk -> embed -> insert Milvus + PG.
+
+        Aligns with Yuxi's KnowledgeBase.index_file():
+        1. Status PARSED -> INDEXING
+        2. Read markdown_file from storage
+        3. Chunk markdown using ragflow_like dispatcher
+        4. Embed chunks
+        5. Double-write: Milvus insert + PostgreSQL upsert (with rollback on failure)
+        6. Status INDEXING -> INDEXED (or ERROR_INDEXING on failure)
+        """
         if kb_id not in self.databases_meta:
             raise ValueError(f"Database {kb_id} not found")
 
         if not self._connected:
             raise RuntimeError("Milvus is not connected. Cannot index files.")
 
-        collection = await self._get_milvus_collection(kb_id)
+        collection = await self._get_or_create_collection(kb_id)
         if not collection:
             raise RuntimeError(f"Failed to get Milvus collection for {kb_id}")
 
@@ -263,8 +343,8 @@ class MilvusKB(KnowledgeBase):
         if not file_meta.get("markdown_file"):
             raise ValueError("File has not been parsed yet. Call parse first.")
 
-        # Stage: chunking
-        self.files_meta[file_id]["status"] = FileStatus.CHUNKING
+        # Stage: indexing (encompasses chunking + embedding + writing)
+        self.files_meta[file_id]["status"] = FileStatus.INDEXING
         await self._persist_file(file_id)
 
         try:
@@ -279,65 +359,81 @@ class MilvusKB(KnowledgeBase):
                 text_content = data.decode("utf-8")
 
             filename = file_meta.get("filename", "")
-            parse_metadata = file_meta.get("parse_metadata", {})
-            pages = parse_metadata.get("pages", [])
+            processing_params = file_meta.get("processing_params", {})
 
-            # Chunk
-            chunks = self._do_chunking(text_content, file_id, kb_id, filename,
-                                       pages=pages, parse_metadata=parse_metadata)
-            logger.info(f"Split {filename} into {len(chunks)} chunks")
+            # Chunk using ragflow_like dispatcher (returns list of dicts with position info)
+            chunks = ragflow_chunk_markdown(
+                text_content,
+                file_id=file_id,
+                filename=filename,
+                processing_params=processing_params,
+            )
+            logger.info(f"Split {filename} into {len(chunks)} chunks (ragflow_like)")
 
             if not chunks:
                 raise ValueError(f"No chunks generated from {filename}. The file content may be too short or empty.")
 
-            # Delete existing chunks for this file
-            await self._delete_file_chunks(kb_id, file_id, collection)
+            # Delete existing chunks for this file (both Milvus and PG)
+            await self._delete_file_chunks_from_milvus(collection, file_id)
+            chunk_repo = KnowledgeChunkRepository()
+            await chunk_repo.delete_by_file_id(file_id)
 
-            # Stage: embedding
-            self.files_meta[file_id]["status"] = FileStatus.EMBEDDING
-            await self._persist_file(file_id)
-
+            # Embed chunks
             embedding_provider = self._get_embedding_provider()
-            texts = [c.content for c in chunks]
+            texts = [c["content"] for c in chunks]
             embeddings = await embedding_provider.embed_documents(texts)
             logger.info(f"Embedded {len(texts)} chunks")
 
-            # Stage: indexing (writing to Milvus + SQLite)
-            self.files_meta[file_id]["status"] = FileStatus.INDEXING
-            await self._persist_file(file_id)
+            # Prepare entities for Milvus insert
+            ids = [c["id"] for c in chunks]
+            contents = [c["content"] for c in chunks]
+            chunk_ids = [c["chunk_id"] for c in chunks]
+            file_ids = [c["file_id"] for c in chunks]
+            chunk_indices = [c["chunk_index"] for c in chunks]
 
-            ids = [c.chunk_id for c in chunks]
-            kb_ids = [c.kb_id for c in chunks]
-            file_ids = [c.file_id for c in chunks]
-            chunk_ids = [c.chunk_id for c in chunks]
-            contents = [c.content for c in chunks]
-            filenames = [c.filename for c in chunks]
-            chunk_indices = [c.chunk_index for c in chunks]
-            metadata_jsons = [json.dumps(c.metadata, ensure_ascii=False) for c in chunks]
+            entities = [ids, contents, chunk_ids, file_ids, chunk_indices, embeddings]
 
-            entities = [ids, kb_ids, file_ids, chunk_ids, contents, filenames,
-                       chunk_indices, metadata_jsons, embeddings]
-            await asyncio.to_thread(collection.insert, entities)
-            await asyncio.to_thread(collection.flush)
-            logger.info(f"Inserted {len(chunks)} chunks into Milvus")
-
-            # Insert to SQLite
-            chunk_repo = KnowledgeChunkRepository()
-            chunk_records = [
+            # Double-write: Milvus insert + PostgreSQL upsert with rollback on failure
+            pg_records = [
                 {
-                    "chunk_id": c.chunk_id,
-                    "file_id": c.file_id,
-                    "kb_id": c.kb_id,
-                    "chunk_index": c.chunk_index,
-                    "content": c.content,
+                    "chunk_id": c["chunk_id"],
+                    "file_id": c["file_id"],
+                    "kb_id": kb_id,
+                    "chunk_index": c["chunk_index"],
+                    "content": c["content"],
+                    "start_char_pos": c.get("start_char_pos"),
+                    "end_char_pos": c.get("end_char_pos"),
+                    "start_token_pos": c.get("start_token_pos"),
+                    "end_token_pos": c.get("end_token_pos"),
                 }
                 for c in chunks
             ]
-            await chunk_repo.batch_upsert(chunk_records)
+
+            pg_task = asyncio.create_task(chunk_repo.batch_upsert(pg_records))
+            milvus_task = asyncio.create_task(asyncio.to_thread(collection.insert, entities))
+
+            results = await asyncio.gather(pg_task, milvus_task, return_exceptions=True)
+            errors = [r for r in results if isinstance(r, Exception)]
+
+            if errors:
+                # Rollback: delete from both stores
+                logger.error(f"Double-write failed, rolling back: {errors[0]}")
+                try:
+                    await chunk_repo.delete_by_file_id(file_id)
+                except Exception as rb_err:
+                    logger.warning(f"PG rollback failed: {rb_err}")
+                try:
+                    await self._delete_file_chunks_from_milvus(collection, file_id)
+                except Exception as rb_err:
+                    logger.warning(f"Milvus rollback failed: {rb_err}")
+                raise errors[0]
+
+            await asyncio.to_thread(collection.flush)
+            logger.info(f"Inserted {len(chunks)} chunks into Milvus (double-write successful)")
 
             chunk_stats = {
                 "chunk_count": len(chunks),
-                "token_count": sum(count_tokens(c.content) for c in chunks),
+                "token_count": sum(_count_tokens(c["content"]) for c in chunks),
             }
             self.files_meta[file_id]["status"] = FileStatus.INDEXED
             self.files_meta[file_id].update(chunk_stats)
@@ -357,64 +453,69 @@ class MilvusKB(KnowledgeBase):
 
         except Exception as e:
             logger.error(f"Indexing failed for {file_id}: {e}")
-            self.files_meta[file_id]["status"] = FileStatus.FAILED
+            self.files_meta[file_id]["status"] = FileStatus.ERROR_INDEXING
             self.files_meta[file_id]["failed_reason"] = str(e)
-            # Record the stage where failure occurred
-            current_status = self.files_meta[file_id].get("status", FileStatus.FAILED)
-            if current_status == FileStatus.CHUNKING:
-                self.files_meta[file_id]["failed_stage"] = "chunking"
-            elif current_status == FileStatus.EMBEDDING:
-                self.files_meta[file_id]["failed_stage"] = "embedding"
-            else:
-                self.files_meta[file_id]["failed_stage"] = "indexing"
+            self.files_meta[file_id]["failed_stage"] = "indexing"
             self.files_meta[file_id]["failed_at"] = _utc_now()
             await self._persist_file(file_id)
             raise
 
-    async def _delete_file_chunks(self, kb_id: str, file_id: str, collection: Collection) -> None:
-        chunk_repo = KnowledgeChunkRepository()
-        await chunk_repo.delete_by_file_id(file_id)
+    async def _delete_file_chunks_from_milvus(self, collection: Collection, file_id: str) -> None:
+        """Delete all chunks for a file from Milvus collection."""
         try:
             expr = f'file_id == "{file_id}"'
-            await asyncio.to_thread(collection.delete, expr)
+            await _run_milvus_query_io(collection.delete, expr)
         except Exception as e:
             logger.warning(f"Error deleting chunks from Milvus: {e}")
 
     async def aquery(self, query_text: str, kb_id: str, **kwargs) -> list[dict]:
-        search_mode = str(kwargs.get("search_mode", "vector")).lower()
-        if search_mode not in {"vector", "keyword", "hybrid"}:
-            search_mode = "vector"
-        top_k = int(kwargs.get("top_k", 10))
-        similarity_threshold = float(kwargs.get("similarity_threshold", 0.0))
+        """Query knowledge base with retrieval config support.
 
-        if search_mode == "vector":
-            return await self._vector_search(query_text, kb_id, top_k, similarity_threshold)
+        Supports Milvus native hybrid search with WeightedRanker.
+        Falls back gracefully when BM25 is unavailable.
+        """
+        # Build retrieval config from kwargs
+        rc_dict = kwargs.pop("retrieval_config", None)
+        if isinstance(rc_dict, dict):
+            config = MilvusRetrievalConfig(**{k: v for k, v in rc_dict.items() if hasattr(MilvusRetrievalConfig, k)})
+        else:
+            config = MilvusRetrievalConfig(
+                search_mode=str(kwargs.get("search_mode", settings.DEFAULT_SEARCH_MODE)),
+                final_top_k=int(kwargs.get("top_k", 10)),
+                similarity_threshold=float(kwargs.get("similarity_threshold", 0.0)),
+            )
+
+        search_mode = config.search_mode.lower()
+        if search_mode not in ("vector", "keyword", "hybrid"):
+            search_mode = "hybrid"
+
+        if search_mode == "hybrid":
+            return await self._native_hybrid_search(query_text, kb_id, config)
+        elif search_mode == "vector":
+            return await self._vector_search(query_text, kb_id, config)
         elif search_mode == "keyword":
-            return await self._keyword_search(query_text, kb_id, top_k, similarity_threshold)
-        elif search_mode == "hybrid":
-            hybrid_kwargs = {k: v for k, v in kwargs.items() if k not in ("top_k", "similarity_threshold", "search_mode")}
-            return await self._hybrid_search(query_text, kb_id, top_k, similarity_threshold, **hybrid_kwargs)
+            return await self._bm25_search(query_text, kb_id, config)
         return []
 
-    async def _vector_search(self, query_text: str, kb_id: str, top_k: int,
-                             similarity_threshold: float) -> list[dict]:
+    async def _vector_search(self, query_text: str, kb_id: str,
+                             config: MilvusRetrievalConfig) -> list[dict]:
+        """Pure vector search using dense embeddings."""
         if not self._connected:
-            raise RuntimeError("Milvus is not connected. Cannot perform vector search.")
-        collection = await self._get_milvus_collection(kb_id)
+            raise RuntimeError("Milvus is not connected.")
+        collection = await self._get_or_create_collection(kb_id)
         if not collection:
             raise RuntimeError(f"Collection for {kb_id} not found")
 
         embedding_provider = self._get_embedding_provider()
         query_embedding = await embedding_provider.embed_query(query_text)
-        search_params = {"metric_type": VECTOR_METRIC_TYPE, "params": {}}
-        output_fields = ["content", "chunk_id", "file_id", "filename", "chunk_index", "metadata_json"]
+        output_fields = ["content", "chunk_id", "file_id", "chunk_index"]
 
-        results = await asyncio.to_thread(
+        results = await _run_milvus_query_io(
             collection.search,
             data=[query_embedding],
             anns_field="embedding",
-            param=search_params,
-            limit=top_k,
+            param={"metric_type": VECTOR_METRIC_TYPE, "params": {"nprobe": 10}},
+            limit=config.final_top_k,
             output_fields=output_fields,
         )
 
@@ -422,172 +523,204 @@ class MilvusKB(KnowledgeBase):
         if results and len(results) > 0:
             for hit in results[0]:
                 score = float(hit.distance) if hit.distance is not None else 0.0
-                # For FakeEmbeddingProvider, Milvus may return None distance
-                # Set a default score based on rank position
                 if hit.distance is None:
                     score = round(1.0 - (len(retrieved) * 0.1), 4)
-                if similarity_threshold > 0 and score < similarity_threshold:
+                if config.similarity_threshold > 0 and score < config.similarity_threshold:
                     continue
                 entity = hit.entity
-                metadata = {}
-                try:
-                    metadata = json.loads(entity.get("metadata_json", "{}"))
-                except Exception:
-                    pass
                 retrieved.append({
                     "chunk_id": entity.get("chunk_id", ""),
                     "file_id": entity.get("file_id", ""),
-                    "filename": entity.get("filename", ""),
+                    "filename": self._get_filename(entity.get("file_id")),
                     "content": entity.get("content", ""),
                     "score": score,
+                    "chunk_index": entity.get("chunk_index", 0),
                     "score_detail": {
                         "vector_score": score,
                         "keyword_score": 0.0,
                         "final_score": score,
                         "source": "vector",
                     },
-                    "metadata": metadata,
                 })
         return retrieved
 
-    async def _keyword_search(self, query_text: str, kb_id: str, top_k: int,
-                              similarity_threshold: float) -> list[dict]:
-        """Keyword search using SQLite fallback with multi-keyword matching and scoring.
+    async def _bm25_search(self, query_text: str, kb_id: str,
+                           config: MilvusRetrievalConfig) -> list[dict]:
+        """BM25 keyword search using Milvus native sparse vector."""
+        if not self._connected:
+            raise RuntimeError("Milvus is not connected.")
+        collection = await self._get_or_create_collection(kb_id)
+        if not collection:
+            raise RuntimeError(f"Collection for {kb_id} not found")
 
-        Keyword search currently uses SQLite fallback. Milvus BM25 is reserved for future enhancement.
-        """
-        chunk_repo = KnowledgeChunkRepository()
-        chunks_with_scores = await chunk_repo.search_by_keyword(kb_id, query_text, limit=top_k * 2)
+        output_fields = ["content", "chunk_id", "file_id", "chunk_index"]
 
-        results = []
-        for chunk, kw_score in chunks_with_scores:
-            results.append({
-                "chunk_id": chunk.chunk_id,
-                "file_id": chunk.file_id,
-                "filename": self._get_filename(chunk.file_id),
-                "content": chunk.content,
-                "score": kw_score,
-                "score_detail": {
-                    "vector_score": 0.0,
-                    "keyword_score": kw_score,
-                    "final_score": kw_score,
-                    "source": "keyword",
-                },
-                "metadata": {"search_mode": "keyword"},
-            })
+        results = await _run_milvus_query_io(
+            collection.search,
+            data=[query_text],
+            anns_field="content_sparse",
+            param={
+                "metric_type": "BM25",
+                "params": {"drop_ratio_search": config.bm25_drop_ratio_search},
+            },
+            limit=config.bm25_top_k,
+            output_fields=output_fields,
+        )
 
-        # Apply similarity threshold
-        if similarity_threshold > 0:
-            results = [r for r in results if r["score"] >= similarity_threshold]
-
-        return results[:top_k]
-
-    async def _hybrid_search(self, query_text: str, kb_id: str, top_k: int,
-                             similarity_threshold: float, **kwargs) -> list[dict]:
-        """Hybrid search combining vector and keyword results with weighted scoring.
-
-        Current implementation: merge vector + keyword results with weighted scoring.
-        Future: use Milvus native hybrid_search with WeightedRanker when BM25 is supported.
-        """
-        vector_weight = float(kwargs.get("vector_weight", 0.7))
-        keyword_weight = float(kwargs.get("keyword_weight", 0.3))
-
-        vector_results = []
-        keyword_results = []
-
-        try:
-            vector_results = await self._vector_search(query_text, kb_id, top_k, 0.0)
-        except Exception as e:
-            logger.warning(f"Vector search failed in hybrid: {e}")
-
-        try:
-            keyword_results = await self._keyword_search(query_text, kb_id, top_k, 0.0)
-        except Exception as e:
-            logger.warning(f"Keyword search failed in hybrid: {e}")
-
-        # Normalize vector scores to [0, 1]
-        vector_scores = [r["score"] for r in vector_results]
-        if vector_scores:
-            max_vec = max(vector_scores)
-            min_vec = min(vector_scores)
-            # When all scores are equal, treat as if they all have the same top score
-            # Normalize to 1.0 by setting min=0 and range=1
-            if max_vec == min_vec:
-                min_vec = 0.0
-                vec_range = max_vec if max_vec > 0 else 1.0
-            else:
-                vec_range = max_vec - min_vec
-        else:
-            max_vec = min_vec = 0.0
-            vec_range = 1.0
-
-        # Normalize keyword scores to [0, 1]
-        keyword_scores = [r["score"] for r in keyword_results]
-        if keyword_scores:
-            max_kw = max(keyword_scores)
-            min_kw = min(keyword_scores)
-            if max_kw == min_kw:
-                min_kw = 0.0
-                kw_range = max_kw if max_kw > 0 else 1.0
-            else:
-                kw_range = max_kw - min_kw
-        else:
-            max_kw = min_kw = 0.0
-            kw_range = 1.0
-
-        # Merge results: same chunk from both sources gets combined score
-        merged: dict[str, dict] = {}
-
-        for r in vector_results:
-            key = r["chunk_id"]
-            # When all scores are equal (single result), normalize to 1.0
-            if vec_range > 0:
-                normalized_vec = (r["score"] - min_vec) / vec_range
-            else:
-                normalized_vec = 1.0 if r["score"] > 0 else 0.0
-            merged[key] = {
-                **r,
-                "score": normalized_vec * vector_weight,
-                "score_detail": {
-                    "vector_score": round(normalized_vec, 4),
-                    "keyword_score": 0.0,
-                    "final_score": round(normalized_vec * vector_weight, 4),
-                    "source": "hybrid",
-                },
-            }
-
-        for r in keyword_results:
-            key = r["chunk_id"]
-            if kw_range > 0:
-                normalized_kw = (r["score"] - min_kw) / kw_range
-            else:
-                normalized_kw = 1.0 if r["score"] > 0 else 0.0
-            weighted_kw = normalized_kw * keyword_weight
-            if key in merged:
-                # Merge: chunk found in both vector and keyword
-                merged[key]["score"] += weighted_kw
-                merged[key]["score_detail"]["keyword_score"] = round(normalized_kw, 4)
-                merged[key]["score_detail"]["final_score"] = round(merged[key]["score"], 4)
-            else:
-                merged[key] = {
-                    **r,
-                    "score": weighted_kw,
+        retrieved = []
+        if results and len(results) > 0:
+            for hit in results[0]:
+                score = float(hit.distance) if hit.distance is not None else 0.0
+                if config.similarity_threshold > 0 and score < config.similarity_threshold:
+                    continue
+                entity = hit.entity
+                retrieved.append({
+                    "chunk_id": entity.get("chunk_id", ""),
+                    "file_id": entity.get("file_id", ""),
+                    "filename": self._get_filename(entity.get("file_id")),
+                    "content": entity.get("content", ""),
+                    "score": score,
+                    "chunk_index": entity.get("chunk_index", 0),
                     "score_detail": {
                         "vector_score": 0.0,
-                        "keyword_score": round(normalized_kw, 4),
-                        "final_score": round(weighted_kw, 4),
+                        "keyword_score": score,
+                        "final_score": score,
+                        "source": "keyword",
+                    },
+                })
+        return retrieved[:config.final_top_k]
+
+    async def _native_hybrid_search(self, query_text: str, kb_id: str,
+                                    config: MilvusRetrievalConfig) -> list[dict]:
+        """Milvus native hybrid search using AnnSearchRequest + WeightedRanker.
+
+        This is the primary search mode that combines:
+        1. Dense vector search (COSINE distance on embeddings)
+        2. BM25 sparse vector search (on content_sparse field)
+        3. WeightedRanker fusion with configurable weights
+        """
+        if not self._connected:
+            raise RuntimeError("Milvus is not connected.")
+        collection = await self._get_or_create_collection(kb_id)
+        if not collection:
+            raise RuntimeError(f"Collection for {kb_id} not found")
+
+        embedding_provider = self._get_embedding_provider()
+        query_embedding = await embedding_provider.embed_query(query_text)
+        recall_top_k = config.recall_top_k
+        output_fields = ["content", "chunk_id", "file_id", "chunk_index"]
+
+        # Build AnnSearchRequest for dense vector search
+        vector_request = AnnSearchRequest(
+            data=[query_embedding],
+            anns_field="embedding",
+            param={"metric_type": VECTOR_METRIC_TYPE, "params": {"nprobe": 10}},
+            limit=recall_top_k,
+            expr=None,
+        )
+
+        # Build AnnSearchRequest for BM25 sparse vector search
+        bm25_request = AnnSearchRequest(
+            data=[query_text],
+            anns_field="content_sparse",
+            param={"metric_type": "BM25", "params": {"drop_ratio_search": config.bm25_drop_ratio_search}},
+            limit=config.bm25_top_k,
+            expr=None,
+        )
+
+        # Execute hybrid search with WeightedRanker
+        try:
+            results = await _run_milvus_query_io(
+                collection.hybrid_search,
+                reqs=[vector_request, bm25_request],
+                rerank=WeightedRanker(config.vector_weight, config.bm25_weight),
+                limit=config.recall_top_k,
+                output_fields=output_fields,
+            )
+        except Exception as e:
+            logger.warning(f"Native hybrid search failed ({e}), falling back to manual merge")
+            # Fallback: run searches separately and merge manually
+            return await self._fallback_hybrid_merge(query_text, kb_id, collection, config)
+
+        retrieved = []
+        if results and len(results) > 0:
+            for hit in results[0]:
+                score = float(hit.distance) if hit.distance is not None else 0.0
+                if config.similarity_threshold > 0 and score < config.similarity_threshold:
+                    continue
+                entity = hit.entity
+                retrieved.append({
+                    "chunk_id": entity.get("chunk_id", ""),
+                    "file_id": entity.get("file_id", ""),
+                    "filename": self._get_filename(entity.get("file_id")),
+                    "content": entity.get("content", ""),
+                    "score": score,
+                    "chunk_index": entity.get("chunk_index", 0),
+                    "score_detail": {
+                        "vector_score": 0.0,  # WeightedRanker produces fused scores
+                        "keyword_score": 0.0,
+                        "final_score": score,
                         "source": "hybrid",
                     },
+                })
+
+        # Apply final_top_k truncation
+        return retrieved[:config.final_top_k]
+
+    async def _fallback_hybrid_merge(self, query_text: str, kb_id: str,
+                                     collection: Collection,
+                                     config: MilvusRetrievalConfig) -> list[dict]:
+        """Fallback: manually merge vector + BM25 results when native hybrid fails."""
+        vector_results = []
+        bm25_results = []
+
+        try:
+            vector_results = await self._vector_search(query_text, kb_id, config)
+        except Exception as e:
+            logger.warning(f"Fallback vector search failed: {e}")
+
+        try:
+            bm25_results = await self._bm25_search(query_text, kb_id, config)
+        except Exception as e:
+            logger.warning(f"Fallback BM25 search failed: {e}")
+
+        # Merge by chunk_id, weighted sum of normalized scores
+        vec_scores = [(r["chunk_id"], r["score"]) for r in vector_results]
+        bm25_scores = [(r["chunk_id"], r["score"]) for r in bm25_results]
+
+        merged: dict[str, dict] = {}
+
+        for cid, vscore in vec_scores:
+            merged[cid] = next((r for r in vector_results if r["chunk_id"] == cid), {})
+            merged[cid]["score_detail"] = {
+                "vector_score": vscore,
+                "keyword_score": 0.0,
+                "final_score": vscore * config.vector_weight,
+                "source": "hybrid",
+            }
+            merged[cid]["score"] = vscore * config.vector_weight
+
+        for cid, bscore in bm25_scores:
+            weighted_b = bscore * config.bm25_weight
+            if cid in merged:
+                merged[cid]["score"] += weighted_b
+                merged[cid]["score_detail"]["keyword_score"] = bscore
+                merged[cid]["score_detail"]["final_score"] = merged[cid]["score"]
+            else:
+                rec = next((r for r in bm25_results if r["chunk_id"] == cid), {})
+                merged[cid] = {**rec}
+                merged[cid]["score_detail"] = {
+                    "vector_score": 0.0,
+                    "keyword_score": bscore,
+                    "final_score": weighted_b,
+                    "source": "hybrid",
                 }
+                merged[cid]["score"] = weighted_b
 
-        # Sort by final score descending
         results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
-
-        # Apply similarity threshold on final score
-        if similarity_threshold > 0:
-            results = [r for r in results if r["score"] >= similarity_threshold]
-
-        return results[:top_k]
+        if config.similarity_threshold > 0:
+            results = [r for r in results if r["score"] >= config.similarity_threshold]
+        return results[:config.final_top_k]
 
     def _get_filename(self, file_id: str | None) -> str:
         if not file_id:
@@ -595,9 +728,12 @@ class MilvusKB(KnowledgeBase):
         return self.files_meta.get(file_id, {}).get("filename") or "unknown"
 
     async def delete_file(self, kb_id: str, file_id: str) -> None:
-        collection = await self._get_milvus_collection(kb_id)
+        collection = await self._get_or_create_collection(kb_id)
         if collection:
-            await self._delete_file_chunks(kb_id, file_id, collection)
+            await self._delete_file_chunks_from_milvus(collection, file_id)
+        # Delete from PG
+        chunk_repo = KnowledgeChunkRepository()
+        await chunk_repo.delete_by_file_id(file_id)
         if file_id in self.files_meta:
             del self.files_meta[file_id]
             from app.rag.repositories.file_repository import KnowledgeFileRepository
@@ -634,12 +770,14 @@ class MilvusKB(KnowledgeBase):
             logger.error(f"Failed to drop collection {kb_id}: {e}")
         return await super().delete_database(kb_id)
 
-    def __del__(self):
-        try:
-            if hasattr(self, "connection_alias"):
-                connections.disconnect(self.connection_alias)
-        except Exception:
-            pass
+
+def _count_tokens(text: str) -> int:
+    """Approximate token count for statistics."""
+    import re
+    if not text:
+        return 0
+    parts = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text)
+    return max(1, len(parts)) if text.strip() else 0
 
 
 def _utc_now() -> str:

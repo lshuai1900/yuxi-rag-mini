@@ -1,25 +1,29 @@
 <template>
   <div>
     <div class="card">
-      <h2 style="margin-bottom: 16px;">Knowledge Bases</h2>
-      <div style="display: flex; gap: 12px; margin-bottom: 16px;">
-        <input v-model="newKbName" placeholder="Knowledge base name" style="flex: 1" />
-        <input v-model="newKbDesc" placeholder="Description (optional)" style="flex: 2" />
-        <button class="btn btn-primary" @click="createKb">Create</button>
+      <div class="section-header">
+        <h2>Knowledge Bases</h2>
+      </div>
+      <div class="create-row">
+        <input v-model="newKbName" placeholder="Knowledge base name" class="input-name" />
+        <input v-model="newKbDesc" placeholder="Description (optional)" class="input-desc" />
+        <button class="btn btn-primary" @click="createKb" :disabled="!newKbName.trim()">Create</button>
       </div>
     </div>
 
     <div v-if="loading" class="empty-state">Loading...</div>
-    <div v-else-if="kbs.length === 0" class="empty-state">No knowledge bases yet. Create one above.</div>
+    <div v-else-if="kbs.length === 0" class="empty-state">No knowledge bases. Create one above to get started.</div>
     <div v-else>
-      <div v-for="kb in kbs" :key="kb.kb_id" class="card" style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <h3 style="cursor: pointer; color: #4361ee;" @click="$emit('select-kb', kb.kb_id)">{{ kb.name }}</h3>
-          <p style="color: #666; font-size: 13px;">{{ kb.description || 'No description' }}</p>
-          <div style="margin-top: 8px; font-size: 12px; color: #999;">
-            <span>ID: {{ kb.kb_id }}</span> &middot;
-            <span>Files: {{ kb.stats?.file_count || 0 }}</span> &middot;
-            <span>Chunks: {{ kb.stats?.chunk_count || 0 }}</span>
+      <div v-for="kb in kbs" :key="kb.kb_id" class="card kb-card">
+        <div class="kb-info">
+          <h3 class="kb-name" @click="$emit('select-kb', kb.kb_id)">{{ kb.name }}</h3>
+          <p class="kb-desc">{{ kb.description || 'No description' }}</p>
+          <div class="kb-stats">
+            <span class="stat-item"><span class="stat-label">ID</span> <span class="stat-value mono">{{ kb.kb_id }}</span></span>
+            <span class="stat-divider">&middot;</span>
+            <span class="stat-item"><span class="stat-label">Files</span> <span class="stat-value">{{ kb.stats?.file_count || 0 }}</span></span>
+            <span class="stat-divider">&middot;</span>
+            <span class="stat-item"><span class="stat-label">Chunks</span> <span class="stat-value">{{ kb.stats?.chunk_count || 0 }}</span></span>
           </div>
         </div>
         <button class="btn btn-danger btn-sm" @click="deleteKb(kb.kb_id)">Delete</button>
@@ -75,3 +79,67 @@ async function deleteKb(kbId: string) {
 
 onMounted(loadKbs)
 </script>
+
+<style scoped>
+.section-header {
+  margin-bottom: 16px;
+}
+.section-header h2 {
+  margin: 0;
+}
+.create-row {
+  display: flex;
+  gap: 12px;
+}
+.input-name {
+  flex: 1;
+}
+.input-desc {
+  flex: 2;
+}
+.kb-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.kb-name {
+  cursor: pointer;
+  color: var(--accent-hover);
+  font-size: 15px;
+  margin-bottom: 4px;
+  transition: color 0.15s;
+}
+.kb-name:hover {
+  color: #fff;
+}
+.kb-desc {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.kb-stats {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.stat-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.stat-label {
+  color: var(--text-muted);
+}
+.stat-value {
+  color: var(--text-secondary);
+}
+.stat-value.mono {
+  font-family: monospace;
+  font-size: 11px;
+}
+.stat-divider {
+  color: var(--text-muted);
+  margin: 0 4px;
+}
+</style>

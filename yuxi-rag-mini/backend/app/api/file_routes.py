@@ -61,6 +61,10 @@ async def index_file(kb_id: str, file_id: str):
             file_meta = kb_instance.files_meta[file_id]
             if file_meta.get("status") in [FileStatus.UPLOADED]:
                 await manager.parse_file(kb_id, file_id)
+            elif file_meta.get("status") in [FileStatus.ERROR_PARSING, FileStatus.ERROR_INDEXING]:
+                # Re-try from appropriate stage
+                if file_meta.get("status") == FileStatus.ERROR_PARSING:
+                    await manager.parse_file(kb_id, file_id)
 
         result = await manager.index_file(kb_id, file_id)
         return IndexResponse(**result)

@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     # Rerank
     RERANK_PROVIDER: str = "dummy"
 
+    # Milvus Query Offload
+    MILVUS_QUERY_OFFLOAD_SEMAPHORE: int = 8
+
+    # Retrieval defaults
+    DEFAULT_SEARCH_MODE: str = "hybrid"
+    DEFAULT_VECTOR_WEIGHT: float = 0.7
+    DEFAULT_BM25_WEIGHT: float = 0.3
+    DEFAULT_BM25_TOP_K: int = 20
+    DEFAULT_RECALL_TOP_K: int = 20
+    DEFAULT_BM25_DROP_RATIO_SEARCH: float = 0.2
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def log_config(self) -> str:
@@ -58,6 +69,13 @@ class Settings(BaseSettings):
             f"  EMBEDDING_CHUNK_SIZE={self.EMBEDDING_CHUNK_SIZE}",
             f"  EMBEDDING_CHUNK_OVERLAP={self.EMBEDDING_CHUNK_OVERLAP}",
             f"  RERANK_PROVIDER={self.RERANK_PROVIDER}",
+            f"  MILVUS_QUERY_OFFLOAD_SEMAPHORE={self.MILVUS_QUERY_OFFLOAD_SEMAPHORE}",
+            f"  DEFAULT_SEARCH_MODE={self.DEFAULT_SEARCH_MODE}",
+            f"  DEFAULT_VECTOR_WEIGHT={self.DEFAULT_VECTOR_WEIGHT}",
+            f"  DEFAULT_BM25_WEIGHT={self.DEFAULT_BM25_WEIGHT}",
+            f"  DEFAULT_BM25_TOP_K={self.DEFAULT_BM25_TOP_K}",
+            f"  DEFAULT_RECALL_TOP_K={self.DEFAULT_RECALL_TOP_K}",
+            f"  DEFAULT_BM25_DROP_RATIO_SEARCH={self.DEFAULT_BM25_DROP_RATIO_SEARCH}",
         ]
         # Do NOT log EMBEDDING_API_KEY
         if self.EMBEDDING_PROVIDER == "fake":

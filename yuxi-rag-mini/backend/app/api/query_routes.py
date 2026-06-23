@@ -23,12 +23,19 @@ async def query_knowledge_base(kb_id: str, body: QueryRequest):
                 )],
             )
 
+        # Build kwargs for aquery, including retrieval_config if provided
+        query_kwargs = {
+            "search_mode": body.search_mode,
+            "top_k": body.top_k,
+            "similarity_threshold": body.similarity_threshold,
+        }
+        if body.retrieval_config:
+            query_kwargs["retrieval_config"] = body.retrieval_config
+
         results = await manager.aquery(
             body.query,
             kb_id,
-            search_mode=body.search_mode,
-            top_k=body.top_k,
-            similarity_threshold=body.similarity_threshold,
+            **query_kwargs,
         )
 
         # Apply rerank if requested
@@ -63,6 +70,7 @@ async def query_knowledge_base(kb_id: str, body: QueryRequest):
                 file_id=r.get("file_id", ""),
                 filename=r.get("filename", ""),
                 content=r.get("content", ""),
+                chunk_index=r.get("chunk_index", 0),
                 score=r.get("score", 0.0),
                 score_detail=score_detail,
                 metadata=r.get("metadata", {}),
