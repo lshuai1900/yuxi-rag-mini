@@ -34,9 +34,10 @@
               <span class="badge" :class="statusClass(file.status)">{{ file.status }}</span>
             </td>
             <td>{{ file.chunk_count || 0 }}</td>
-            <td>
-              <button v-if="file.status === 'uploaded'" class="btn btn-primary btn-sm" @click="ingest(file.file_id)">Ingest</button>
-              <button v-if="file.status === 'parsed'" class="btn btn-success btn-sm" @click="indexFile_(file.file_id)">Index</button>
+            <td style="display: flex; gap: 4px;">
+              <button v-if="canIndex(file.status)" class="btn btn-primary btn-sm" @click="doIndex(file.file_id)" :disabled="indexing[file.file_id]">
+                {{ indexing[file.file_id] ? 'Indexing...' : 'Index' }}
+              </button>
               <button class="btn btn-danger btn-sm" @click="deleteFile_(file.file_id)">Delete</button>
             </td>
           </tr>
@@ -49,10 +50,11 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { uploadFile, listFiles, ingestFile, indexFile, deleteFile } from '../api/kb'
+import { uploadFile, listFiles, indexFile, deleteFile } from '../api/kb'
 
 const props = defineProps<{ kbId: string }>()
 const files = ref<any[]>([])
+const indexing = ref<Record<string, boolean>>({})
 
 async function loadFiles() {
   if (!props.kbId) return
@@ -90,21 +92,20 @@ async function handleDrop(event: DragEvent) {
   await loadFiles()
 }
 
-async function ingest(fileId: string) {
-  try {
-    await ingestFile(props.kbId, fileId)
-    await loadFiles()
-  } catch (e) {
-    console.error('Ingest failed', e)
-  }
+function canIndex(status: string) {
+  return ['uploaded', 'parsed', 'error_parsing', 'error_indexing'].includes(status)
 }
 
-async function indexFile_(fileId: string) {
+async function doIndex(fileId: string) {
+  indexing.value[fileId] = true
   try {
     await indexFile(props.kbId, fileId)
     await loadFiles()
-  } catch (e) {
-    console.error('Index failed', e)
+  } catch (e: any) {
+    const msg = e?.response?.data?.detail || 'Index failed'
+    alert(msg)
+  } finally {
+    indexing.value[fileId] = false
   }
 }
 
@@ -119,9 +120,10 @@ async function deleteFile_(fileId: string) {
 }
 
 function statusClass(status: string) {
-  if (status === 'indexed' || status === 'done') return 'badge-success'
+  if (status === 'indexed') return 'badge-success'
   if (status === 'uploaded' || status === 'parsed') return 'badge-info'
   if (status?.startsWith('error')) return 'badge-danger'
+  if (status === 'parsing' || status === 'indexing') return 'badge-warning'
   return 'badge-warning'
 }
 

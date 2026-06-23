@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from app.core.logging import logger
-from app.rag.schemas import SearchOutputSchema, SearchResultSchema
 
 
 class FileStatus:
@@ -162,25 +161,15 @@ class KnowledgeBase(ABC):
 
     @staticmethod
     def build_search_output(kb_id: str, retrieval_results: list[dict]) -> dict:
+        """Build search output from raw retrieval results."""
         if not isinstance(retrieval_results, list):
             return retrieval_results
         results = []
-        for index, chunk in enumerate(retrieval_results):
+        for chunk in retrieval_results:
             if not isinstance(chunk, dict):
                 continue
-            metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
-            file_id = metadata.get("file_id") or chunk.get("file_id") or ""
-            chunk_id = metadata.get("chunk_id") or chunk.get("chunk_id") or chunk.get("id") or ""
-            results.append(
-                SearchResultSchema(
-                    id=str(chunk_id or f"{file_id}:{index + 1}"),
-                    kb_id=str(kb_id),
-                    file_id=str(file_id or ""),
-                    content=str(chunk.get("content") or ""),
-                    metadata=metadata,
-                )
-            )
-        return SearchOutputSchema(kb_id=str(kb_id), results=results).model_dump()
+            results.append(chunk)
+        return {"kb_id": str(kb_id), "results": results}
 
     async def _persist_file(self, file_id: str) -> None:
         from app.rag.repositories.file_repository import KnowledgeFileRepository
