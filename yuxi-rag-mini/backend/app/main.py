@@ -9,7 +9,7 @@ from app.rag.storage.database import init_db
 from app.rag.manager import KnowledgeBaseManager
 from app.rag.factory import KnowledgeBaseFactory
 from app.rag.backends.milvus_kb import MilvusKB
-from app.api import kb_routes, file_routes, query_routes, health_routes
+from app.api import kb_routes, file_routes, query_routes, chat_routes, health_routes
 
 
 @asynccontextmanager
@@ -53,6 +53,7 @@ app.include_router(health_routes.router)
 app.include_router(kb_routes.router)
 app.include_router(file_routes.router)
 app.include_router(query_routes.router)
+app.include_router(chat_routes.router)
 
 
 if __name__ == "__main__":

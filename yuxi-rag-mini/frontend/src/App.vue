@@ -14,12 +14,16 @@
         <button @click="currentView = 'query'" :class="{ active: currentView === 'query' }">
           <span class="nav-icon">&#8981;</span> Query
         </button>
+        <button @click="currentView = 'chat'" :class="{ active: currentView === 'chat' }">
+          <span class="nav-icon">&#128172;</span> Chat
+        </button>
       </nav>
     </header>
     <main>
       <KnowledgeBaseView v-if="currentView === 'kb'" @select-kb="selectKb" />
       <UploadView v-if="currentView === 'upload'" :kb-id="selectedKbId" />
       <QueryView v-if="currentView === 'query'" :kb-id="selectedKbId" />
+      <ChatView v-if="currentView === 'chat'" :kb-id="selectedKbId" />
     </main>
   </div>
 </template>
@@ -29,6 +33,7 @@ import { ref } from 'vue'
 import KnowledgeBaseView from './views/KnowledgeBaseView.vue'
 import UploadView from './views/UploadView.vue'
 import QueryView from './views/QueryView.vue'
+import ChatView from './views/ChatView.vue'
 
 const currentView = ref('kb')
 const selectedKbId = ref('')

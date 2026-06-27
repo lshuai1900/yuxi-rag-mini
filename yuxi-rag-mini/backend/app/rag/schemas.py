@@ -45,6 +45,36 @@ class QueryRequest(BaseModel):
     retrieval_config: dict[str, Any] | None = None
 
 
+class CitationSchema(BaseModel):
+    """Citation / source item for chat answers."""
+    index: int
+    chunk_id: str = ""
+    file_id: str = ""
+    filename: str = ""
+    chunk_index: int = 0
+    score: float = 0.0
+    content: str = ""
+
+
+class ChatRequest(BaseModel):
+    """Request body for the knowledge base chat endpoint."""
+    query: str = Field(description="user question")
+    search_mode: Literal["vector", "keyword", "hybrid"] = "hybrid"
+    top_k: int = Field(default=6, ge=1, le=20)
+    similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    temperature: float = Field(default=0.2, ge=0.0, le=1.0)
+    max_tokens: int = Field(default=1200, ge=128, le=4096)
+    retrieval_config: dict[str, Any] | None = None
+
+
+class ChatResponse(BaseModel):
+    """Response body for the knowledge base chat endpoint."""
+    query: str
+    answer: str
+    sources: list[CitationSchema] = Field(default_factory=list)
+    search_mode: str = "hybrid"
+
+
 class KBCreateSchema(BaseModel):
     name: str
     description: str = ""
