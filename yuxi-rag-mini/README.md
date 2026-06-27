@@ -13,13 +13,13 @@
 ┌────────────────────────────▼────────────────────────────────┐
 │                      FastAPI 后端                             │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ KB 路由   │  │文件路由   │  │查询路由   │  │健康检查路由   │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────────┘ │
-│       └──────────────┼─────────────┘                          │
-│              ┌───────▼────────┐                               │
-│              │ KnowledgeBase  │                               │
-│              │    Manager     │                               │
-│              └───────┬────────┘                               │
+│  │ KB 路由   │  │文件路由   │  │查询路由   │  │ Chat 路由      │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬───────┘ │
+│       └──────────────┼─────────────┘                 │      │
+│              ┌───────▼────────┐              ┌───────▼────┐  │
+│              │ KnowledgeBase  │              │ LLM Provider│ │
+│              │    Manager     │              │(OpenAI 兼容)│ │
+│              └───────┬────────┘              └───────┬────┘  │
 │     ┌────────────────┼────────────────┐                      │
 │  ┌──▼──────────┐  ┌─▼────────────┐  ┌──▼──────────────┐   │
 │  │ 统一解析器   │  │ragflow_like  │  │ Embedding        │   │
@@ -156,6 +156,25 @@ result = await parse_source_to_markdown(file_path, params={"filename": "doc.pdf"
 
 可选适配器模式支持重型外部处理器（MinerU、PaddleX、OCR）——懒加载，不可用时不影响启动。
 
+### 知识库问答（Chat）
+
+最小可用的 RAG 问答闭环，独立于 `/query` 检索调试接口：
+
+```text
+用户问题
+  -> manager.aquery（复用现有混合检索）
+  -> build_context（拼接 [1]/[2] 编号参考资料，控制总长度）
+  -> LLMProvider.achat（OpenAI 兼容 /chat/completions，也支持本地 Ollama）
+  -> ChatResponse { answer, sources[] }
+```
+
+- 接口：`POST /api/kb/{kb_id}/chat`（[chat_routes.py](backend/app/api/chat_routes.py)）
+- 服务：[qa_service.py](backend/app/rag/qa_service.py) 的 `KnowledgeQAService.answer`
+- LLM 客户端：[providers/llm.py](backend/app/rag/providers/llm.py) 的 `LLMProvider` / `create_llm_provider`
+- Prompt 约束模型只能依据【参考资料】回答；检索结果为空时直接返回"知识库中没有找到足够信息回答这个问题。"，不调用 LLM
+- 错误码：LLM 未配置或不可用返回 `503 LLM_SERVICE_UNAVAILABLE`；其他错误返回 `400/500 CHAT_FAILED`
+- 前端：RAG Console 新增 `Chat` 面板，可选知识库、调 top_k / temperature，展示 answer + sources
+
 ### GraphRAG 字段预留
 
 `KnowledgeChunkModel` 包含图字段（未实现）：
@@ -234,6 +253,37 @@ curl -X POST http://localhost:8000/api/kb/{kb_id}/query \
       "recall_top_k": 20
     }
   }'
+
+# 知识库问答（检索 -> 拼接 context -> LLM -> answer + sources）
+curl -X POST "http://localhost:8000/api/kb/{kb_id}/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "这份文档主要讲了什么？",
+    "search_mode": "hybrid",
+    "top_k": 6,
+    "temperature": 0.2
+  }'
+```
+
+chat 响应示例：
+
+```json
+{
+  "query": "这份文档主要讲了什么？",
+  "answer": "这份文档主要介绍了……[1][2]",
+  "search_mode": "hybrid",
+  "sources": [
+    {
+      "index": 1,
+      "filename": "demo.pdf",
+      "chunk_id": "xxx",
+      "file_id": "yyy",
+      "chunk_index": 3,
+      "score": 0.82,
+      "content": "..."
+    }
+  ]
+}
 ```
 
 ## 配置项
@@ -250,6 +300,10 @@ curl -X POST http://localhost:8000/api/kb/{kb_id}/query \
 | `DEFAULT_VECTOR_WEIGHT` | 0.7 | 混合检索向量权重 |
 | `DEFAULT_BM25_WEIGHT` | 0.3 | 混合检索 BM25 权重 |
 | `MILVUS_QUERY_OFFLOAD_SEMAPHORE` | 8 | Milvus 最大并发查询数 |
+| `LLM_BASE_URL` | https://api.openai.com/v1 | OpenAI 兼容 Chat Completions 地址（也支持 Ollama `/v1`） |
+| `LLM_API_KEY` | (空) | LLM API Key；本地 Ollama 可填 `ollama` |
+| `LLM_MODEL` | gpt-4o-mini | Chat 模型名称 |
+| `LLM_TIMEOUT` | 60 | LLM 请求超时（秒） |
 
 > **注意**：`fake` 向量化生成确定性但无意义的向量，仅用于测试流水线，不可用于真实 RAG 场景。
 
@@ -267,10 +321,15 @@ cd backend && python -m pytest ../tests/ -v
 yuxi-rag-mini/
 ├── backend/app/
 │   ├── api/                          # 路由处理器
-│   ├── core/config.py                # 配置（18+ 配置项）
+│   │   ├── kb_routes.py              # 知识库 CRUD
+│   │   ├── file_routes.py            # 文件上传/解析/索引
+│   │   ├── query_routes.py           # 检索调试接口
+│   │   └── chat_routes.py            # RAG 问答接口（/api/kb/{kb_id}/chat）
+│   ├── core/config.py                # 配置（含 LLM_* 项）
 │   └── rag/
 │       ├── base.py                   # KnowledgeBase ABC + FileStatus（7 状态）
-│       ├── schemas.py                # MilvusRetrievalConfig（18 字段）+ API 模型
+│       ├── schemas.py                # MilvusRetrievalConfig + Chat 请求/响应模型
+│       ├── qa_service.py             # KnowledgeQAService：检索 -> 上下文 -> LLM
 │       ├── backends/milvus_kb.py     # MilvusKB：BM25、WeightedRanker、双写
 │       ├── parser/
 │       │   ├── unified.py            # Parser.aparse() → Markdown 字符串
@@ -285,8 +344,11 @@ yuxi-rag-mini/
 │       ├── repositories/
 │       │   └── chunk_repository.py   # batch_upsert、图相关方法
 │       ├── storage/models.py         # KnowledgeChunkModel（+ 图字段）
-│       └── providers/                # 向量化 + 重排序（可插拔）
+│       └── providers/                # 向量化 + 重排序 + LLM（可插拔）
+│           └── llm.py               # OpenAI 兼容 Chat Completions 客户端
 ├── frontend/src/                     # Vue 3 RAG 控制台（暗色主题）
+│   ├── api/kb.ts                    # 含 chatWithKnowledgeBase 调用
+│   └── views/ChatView.vue           # 知识库问答面板
 ├── tests/                            # 9 个测试文件，57 个测试
 ├── pyproject.toml
 └── .env.example

@@ -46,5 +46,33 @@ export const queryKnowledgeBase = (kbId: string, data: {
   retrieval_config?: RetrievalConfig
 }) => api.post(`/kb/${kbId}/query`, data)
 
+// Chat APIs (RAG QA: retrieve -> LLM -> answer + sources)
+export interface Citation {
+  index: number
+  chunk_id: string
+  file_id: string
+  filename: string
+  chunk_index: number
+  score: number
+  content: string
+}
+
+export interface ChatResponse {
+  query: string
+  answer: string
+  sources: Citation[]
+  search_mode: string
+}
+
+export const chatWithKnowledgeBase = (kbId: string, data: {
+  query: string
+  search_mode?: 'vector' | 'keyword' | 'hybrid'
+  top_k?: number
+  similarity_threshold?: number
+  temperature?: number
+  max_tokens?: number
+  retrieval_config?: RetrievalConfig
+}) => api.post<ChatResponse>(`/kb/${kbId}/chat`, data)
+
 // Health
 export const healthCheck = () => api.get('/health')

@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Rerank
     RERANK_PROVIDER: str = "dummy"
 
+    # LLM (OpenAI-compatible chat completions, also works with local Ollama)
+    LLM_BASE_URL: str = "https://api.openai.com/v1"
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "gpt-4o-mini"
+    LLM_TIMEOUT: int = 60
+
     # Milvus Query Offload
     MILVUS_QUERY_OFFLOAD_SEMAPHORE: int = 8
 
@@ -69,6 +75,9 @@ class Settings(BaseSettings):
             f"  EMBEDDING_CHUNK_SIZE={self.EMBEDDING_CHUNK_SIZE}",
             f"  EMBEDDING_CHUNK_OVERLAP={self.EMBEDDING_CHUNK_OVERLAP}",
             f"  RERANK_PROVIDER={self.RERANK_PROVIDER}",
+            f"  LLM_BASE_URL={self.LLM_BASE_URL}",
+            f"  LLM_MODEL={self.LLM_MODEL}",
+            f"  LLM_API_KEY={'***set***' if self.LLM_API_KEY else '(empty)'}",
             f"  MILVUS_QUERY_OFFLOAD_SEMAPHORE={self.MILVUS_QUERY_OFFLOAD_SEMAPHORE}",
             f"  DEFAULT_SEARCH_MODE={self.DEFAULT_SEARCH_MODE}",
             f"  DEFAULT_VECTOR_WEIGHT={self.DEFAULT_VECTOR_WEIGHT}",
