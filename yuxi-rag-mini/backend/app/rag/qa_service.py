@@ -49,15 +49,20 @@ def build_context(results: list[Any], max_chars: int = 12000) -> tuple[str, list
     context_parts: list[str] = []
     sources: list[CitationSchema] = []
     used_chars = 0
+    # Dedicated citation counter: only increments for items we actually keep,
+    # so the [1], [2], ... labels stay contiguous even when some results are
+    # skipped (empty content) or truncated by the max_chars cap.
+    citation_index = 0
 
-    for idx, item in enumerate(results, start=1):
+    for item in results:
         content = _get_field(item, "content", "") or ""
         if not content.strip():
             # Skip empty content per requirement
             continue
 
+        citation_index += 1
         block = (
-            f"[{idx}] 文件: {_get_field(item, 'filename', '') or ''}\n"
+            f"[{citation_index}] 文件: {_get_field(item, 'filename', '') or ''}\n"
             f"chunk_id: {_get_field(item, 'chunk_id', '') or ''}\n"
             f"chunk_index: {_get_field(item, 'chunk_index', 0)}\n"
             f"score: {float(_get_field(item, 'score', 0.0) or 0.0)}\n"
@@ -66,9 +71,12 @@ def build_context(results: list[Any], max_chars: int = 12000) -> tuple[str, list
         )
 
         if used_chars + len(block) > max_chars and context_parts:
-            # Stop adding more once we exceed the cap (keep at least one block)
+            # Cap reached and we already have at least one block: stop.
+            # Roll back the citation_index we just incremented since this
+            # block is NOT included, so numbering stays consistent.
+            citation_index -= 1
             logger.debug(
-                f"build_context: stopping at {idx - 1} blocks, cap={max_chars}"
+                f"build_context: stopping at {citation_index} blocks, cap={max_chars}"
             )
             break
 
@@ -76,7 +84,7 @@ def build_context(results: list[Any], max_chars: int = 12000) -> tuple[str, list
         used_chars += len(block)
         sources.append(
             CitationSchema(
-                index=idx,
+                index=citation_index,
                 chunk_id=str(_get_field(item, "chunk_id", "") or ""),
                 file_id=str(_get_field(item, "file_id", "") or ""),
                 filename=str(_get_field(item, "filename", "") or ""),

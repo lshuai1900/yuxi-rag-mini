@@ -14,25 +14,19 @@ async def chat_knowledge_base(kb_id: str, body: ChatRequest):
     """Knowledge base QA endpoint.
 
     Pipeline: retrieve -> build context -> LLM -> answer + sources.
+
+    The LLM provider is created lazily (only when needed) and the
+    configuration check is performed inside the service, so an empty
+    retrieval result will short-circuit to the "no information" answer
+    without ever touching the LLM (and without raising 503).
     """
     manager = get_manager()
     try:
+        # Build the provider lazily here; the service will only contact it
+        # when retrieval actually returned usable context.
         llm_provider = create_llm_provider()
-        if not llm_provider.is_configured():
-            logger.error(
-                "Chat failed: LLM provider not configured "
-                "(LLM_BASE_URL / LLM_MODEL missing)."
-            )
-            raise HTTPException(status_code=503, detail=ErrorDetail(
-                code="LLM_SERVICE_UNAVAILABLE",
-                message=(
-                    "LLM service is not configured. Set LLM_BASE_URL and LLM_MODEL "
-                    "(and LLM_API_KEY for OpenAI-compatible services) in the environment."
-                ),
-                details={"kb_id": kb_id},
-            ).model_dump())
-
         service = KnowledgeQAService(manager, llm_provider=llm_provider)
+
         result = await service.answer(
             kb_id=kb_id,
             query=body.query,
@@ -58,7 +52,7 @@ async def chat_knowledge_base(kb_id: str, body: ChatRequest):
         # Re-raise already-built HTTP errors untouched
         raise
     except RuntimeError as e:
-        # LLM call / retrieval runtime errors -> 503
+        # LLM not configured / call failed -> 503
         logger.error(f"Chat failed (runtime): {e}")
         raise HTTPException(status_code=503, detail=ErrorDetail(
             code="LLM_SERVICE_UNAVAILABLE",
@@ -72,3 +66,4 @@ async def chat_knowledge_base(kb_id: str, body: ChatRequest):
             message=str(e),
             details={"kb_id": kb_id, "search_mode": body.search_mode},
         ).model_dump())
+
